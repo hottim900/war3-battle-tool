@@ -8,7 +8,7 @@
 ## 步驟
 
 ```powershell
-cd C:\Users\Tim\war3-battle-tool
+cd C:\Users\<username>\war3-battle-tool
 git pull origin feat/client-crate
 
 # 1. Build (build.rs 會自動下載 16MB CJK 字型)
@@ -39,7 +39,7 @@ target\release\war3-client.exe
 ## Claude Code prompt (Windows session)
 
 ```
-在 C:\Users\Tim\war3-battle-tool 專案。所有程式碼已寫好，需要 Windows 整合測試。
+在 C:\Users\<username>\war3-battle-tool 專案。所有程式碼已寫好，需要 Windows 整合測試。
 1. cargo build --release --package war3-client 確認編譯
 2. 如果 NpcapSender 編譯失敗，debug pcap crate linking
 3. 啟動 server + client，驗證 GUI 正常

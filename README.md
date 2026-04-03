@@ -15,7 +15,7 @@
 
 ## 安裝
 
-1. 從 [GitHub Releases](https://github.com/user/war3-battle-tool/releases) 下載最新版
+1. 從 [GitHub Releases](https://github.com/hottim900/war3-battle-tool/releases) 下載最新版
 2. 安裝 [Npcap](https://npcap.com)
 3. 執行 `war3-client.exe`
 
