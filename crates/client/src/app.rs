@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use eframe::egui;
 use tokio::sync::mpsc;
 use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo, ServerMessage};
 
 use crate::config::AppConfig;
 use crate::net::discovery::NetEvent;
+use crate::net::packet::PacketSender;
 use crate::ui::lobby::LobbyPanel;
 use crate::ui::log_panel::LogPanel;
 use crate::ui::setup_wizard::SetupWizard;
@@ -28,6 +31,7 @@ pub struct War3App {
 
     cmd_tx: mpsc::UnboundedSender<ClientMessage>,
     event_rx: mpsc::UnboundedReceiver<NetEvent>,
+    packet_sender: Option<Arc<dyn PacketSender>>,
 
     connection_state: ConnectionState,
     my_player_id: Option<String>,
@@ -47,6 +51,7 @@ impl War3App {
         config: AppConfig,
         cmd_tx: mpsc::UnboundedSender<ClientMessage>,
         event_rx: mpsc::UnboundedReceiver<NetEvent>,
+        packet_sender: Option<Arc<dyn PacketSender>>,
     ) -> Self {
         setup_cjk_fonts(&cc.egui_ctx);
 
@@ -57,6 +62,7 @@ impl War3App {
             config_changed: false,
             cmd_tx,
             event_rx,
+            packet_sender,
             connection_state: ConnectionState::Disconnected,
             my_player_id: None,
             players: Vec::new(),
@@ -95,6 +101,60 @@ impl War3App {
             nickname: self.config.nickname.clone(),
             war3_version: self.config.war3_version,
         });
+    }
+
+    /// 玩家端：收到房主 IP 後，取 game info 並注入到本地 War3
+    fn try_inject_join(&mut self, host_ip_str: &str) {
+        let sender = match &self.packet_sender {
+            Some(s) => s.clone(),
+            None => {
+                self.log_panel
+                    .warn("封包注入未啟用（缺少 npcap），請手動加入 LAN 遊戲");
+                return;
+            }
+        };
+
+        let host_ip: std::net::Ipv4Addr = match host_ip_str.parse() {
+            Ok(ip) => ip,
+            Err(_) => {
+                self.log_panel.error(format!("無效的 IP: {host_ip_str}"));
+                return;
+            }
+        };
+
+        let version = self.config.war3_version;
+        let local_ip = std::net::Ipv4Addr::LOCALHOST;
+
+        match crate::net::packet::join_room(&*sender, host_ip, local_ip, version) {
+            Ok(()) => {
+                self.log_panel
+                    .info("封包注入成功！請切換到 War3 區域網路畫面");
+            }
+            Err(e) => {
+                self.log_panel
+                    .error(format!("封包注入失敗: {e}"));
+            }
+        }
+    }
+
+    /// 房主端：有玩家加入時，模擬遠端玩家的 broadcast 讓本機 War3 回應
+    fn try_inject_invite(&mut self, player_ip_str: &str) {
+        let sender = match &self.packet_sender {
+            Some(s) => s.clone(),
+            None => return, // 沒有 npcap，靜默跳過
+        };
+
+        let player_ip: std::net::Ipv4Addr = match player_ip_str.parse() {
+            Ok(ip) => ip,
+            Err(_) => return,
+        };
+
+        let version = self.config.war3_version;
+        let local_ip = std::net::Ipv4Addr::LOCALHOST;
+
+        if let Err(e) = crate::net::packet::invite_player(&*sender, player_ip, local_ip, version) {
+            self.log_panel.warn(format!("邀請封包失敗: {e}"));
+        }
     }
 
     fn process_network_events(&mut self) {
@@ -139,7 +199,8 @@ impl War3App {
                 if success {
                     if let Some(ip) = host_ip {
                         self.log_panel
-                            .info(format!("加入成功！房主 IP: {ip}（請切換到 War3 區域網路畫面）"));
+                            .info(format!("取得房主 IP: {ip}，正在注入封包..."));
+                        self.try_inject_join(&ip);
                     }
                 } else {
                     self.log_panel.error("加入失敗，房間可能已關閉。");
@@ -150,7 +211,8 @@ impl War3App {
                 player_ip,
             } => {
                 self.log_panel
-                    .info(format!("玩家 {nickname} 加入你的房間 (IP: {player_ip})"));
+                    .info(format!("玩家 {nickname} 加入，正在邀請... (IP: {player_ip})"));
+                self.try_inject_invite(&player_ip);
             }
             ServerMessage::Error { message } => {
                 self.log_panel.error(format!("伺服器錯誤: {message}"));

@@ -43,7 +43,7 @@ fn main() {
     eframe::run_native(
         "War3 Battle Tool",
         native_options,
-        Box::new(move |cc| Ok(Box::new(War3App::new(cc, config, cmd_tx, event_rx)))),
+        Box::new(move |cc| Ok(Box::new(War3App::new(cc, config, cmd_tx, event_rx, None)))),
     )
     .expect("eframe 啟動失敗");
 }
