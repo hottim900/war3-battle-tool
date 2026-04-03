@@ -154,7 +154,11 @@ impl War3App {
         };
 
         let version = self.config.war3_version;
-        let local_ip = std::net::Ipv4Addr::LOCALHOST;
+        let local_ip: std::net::Ipv4Addr = self
+            .config
+            .local_ip
+            .parse()
+            .unwrap_or(std::net::Ipv4Addr::LOCALHOST);
 
         match crate::net::packet::join_room(&*sender, host_ip, local_ip, version) {
             Ok(()) => {
@@ -180,7 +184,11 @@ impl War3App {
         };
 
         let version = self.config.war3_version;
-        let local_ip = std::net::Ipv4Addr::LOCALHOST;
+        let local_ip: std::net::Ipv4Addr = self
+            .config
+            .local_ip
+            .parse()
+            .unwrap_or(std::net::Ipv4Addr::LOCALHOST);
 
         if let Err(e) = crate::net::packet::invite_player(&*sender, player_ip, local_ip, version) {
             self.log_panel.warn(format!("邀請封包失敗: {e}"));
