@@ -91,10 +91,16 @@ fn spawn_cleanup_task(state: Arc<AppState>) {
 
             let expired = state.cleanup_expired(HEARTBEAT_TIMEOUT, GRACE_PERIOD).await;
 
-            for player_id in expired {
-                warn!(%player_id, "玩家超時（心跳或 grace period），移除");
-                state.remove_player(&player_id).await;
+            if expired.is_empty() {
+                continue;
             }
+
+            // H1/H3: 批次移除，最後只 broadcast 一次
+            for player_id in &expired {
+                warn!(%player_id, "玩家超時（心跳或 grace period），移除");
+                state.remove_player(player_id).await;
+            }
+            state.broadcast_state().await;
         }
     });
 }

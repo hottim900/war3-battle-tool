@@ -104,6 +104,11 @@ impl ClientMessage {
                     return Err("玩家數量必須在 2-12 之間");
                 }
             }
+            ClientMessage::JoinRoom { room_id } => {
+                if room_id.len() > 64 {
+                    return Err("room_id 超過長度限制");
+                }
+            }
             _ => {}
         }
         Ok(())

@@ -88,11 +88,18 @@ impl AppState {
             .collect()
     }
 
-    /// 產生房間列表快照
+    /// 產生房間列表快照（M4: 過濾斷線房主的房間）
     pub async fn room_snapshot(&self) -> Vec<RoomInfo> {
         let rooms = self.rooms.read().await;
+        let players = self.players.read().await;
         rooms
             .values()
+            .filter(|r| {
+                players
+                    .get(&r.host_player_id)
+                    .map(|p| p.disconnected_at.is_none())
+                    .unwrap_or(false)
+            })
             .map(|r| RoomInfo {
                 room_id: r.room_id.clone(),
                 host_nickname: r.host_nickname.clone(),
@@ -135,7 +142,7 @@ impl AppState {
         }
     }
 
-    /// 移除玩家，清理其房間（grace period 到期後由 cleanup task 呼叫）
+    /// 移除玩家，清理其房間（不觸發 broadcast）
     pub async fn remove_player(&self, player_id: &str) {
         let hosting_room = {
             let mut players = self.players.write().await;
@@ -146,11 +153,9 @@ impl AppState {
         if let Some(room_id) = hosting_room {
             self.rooms.write().await.remove(&room_id);
         }
-
-        self.broadcast_state().await;
     }
 
-    /// 清理超時斷線玩家（grace period 到期）
+    /// H1/H3: 批次清理超時玩家，清完後只 broadcast 一次
     pub async fn cleanup_expired(
         &self,
         heartbeat_timeout: std::time::Duration,
@@ -161,11 +166,9 @@ impl AppState {
             players
                 .iter()
                 .filter(|(_, p)| {
-                    // 已斷線且超過 grace period
                     if let Some(dc_at) = p.disconnected_at {
                         dc_at.elapsed() > grace_period
                     } else {
-                        // 在線但心跳超時
                         p.last_heartbeat.elapsed() > heartbeat_timeout
                     }
                 })
