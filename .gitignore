@@ -2,3 +2,4 @@
 *.exe
 *.log
 .gstack/
+crates/client/assets/NotoSansTC-Regular.otf
