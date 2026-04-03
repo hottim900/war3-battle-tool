@@ -45,7 +45,7 @@ async fn main() {
     let bind_addr: std::net::IpAddr = std::env::var("BIND")
         .ok()
         .and_then(|b| b.parse().ok())
-        .unwrap_or_else(|| [0, 0, 0, 0].into());
+        .unwrap_or_else(|| [127, 0, 0, 1].into());
     let addr = SocketAddr::from((bind_addr, port));
     info!("War3 發現伺服器啟動於 {addr}");
 

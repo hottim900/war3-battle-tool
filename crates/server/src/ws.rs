@@ -320,7 +320,15 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         });
                     }
 
+                    drop(players);
+
+                    // 更新房間人數
+                    if let Some(room) = state.rooms.write().await.get_mut(&room_id) {
+                        room.current_players = room.current_players.saturating_add(1);
+                    }
+
                     info!(%room_id, %player_id, "玩家加入房間");
+                    state.broadcast_state().await;
                 }
             }
         }
