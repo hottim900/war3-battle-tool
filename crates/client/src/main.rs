@@ -40,10 +40,42 @@ fn main() {
         ..Default::default()
     };
 
+    // Windows: 嘗試初始化 NpcapSender
+    let packet_sender = create_packet_sender();
+
     eframe::run_native(
         "War3 Battle Tool",
         native_options,
-        Box::new(move |cc| Ok(Box::new(War3App::new(cc, config, cmd_tx, event_rx, None)))),
+        Box::new(move |cc| {
+            Ok(Box::new(War3App::new(
+                cc,
+                config,
+                cmd_tx,
+                event_rx,
+                packet_sender,
+            )))
+        }),
     )
     .expect("eframe 啟動失敗");
+}
+
+fn create_packet_sender() -> Option<std::sync::Arc<dyn net::packet::PacketSender>> {
+    #[cfg(windows)]
+    {
+        match net::npcap_sender::NpcapSender::new(None) {
+            Ok(sender) => {
+                tracing::info!("NpcapSender 初始化成功");
+                Some(std::sync::Arc::new(sender))
+            }
+            Err(e) => {
+                tracing::warn!("NpcapSender 初始化失敗: {e}");
+                None
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        tracing::info!("非 Windows 環境，封包注入不可用");
+        None
+    }
 }
