@@ -17,7 +17,6 @@ const MAX_TOTAL_PLAYERS: usize = 500;
 const MAX_TOTAL_ROOMS: usize = 200;
 const JOIN_COOLDOWN: Duration = Duration::from_secs(5);
 
-/// 簡單的 token bucket 速率限制器
 struct RateLimiter {
     tokens: u32,
     last_refill: Instant,
@@ -51,13 +50,17 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
 
-    // 背景任務：從 channel 讀取訊息送到 WebSocket
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&msg)
-                && ws_sender.send(Message::Text(json.into())).await.is_err()
-            {
-                break;
+            match serde_json::to_string(&msg) {
+                Ok(json) => {
+                    if ws_sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    warn!("ServerMessage 序列化失敗: {e}");
+                }
             }
         }
     });
@@ -67,7 +70,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
     let mut rate_limiter = RateLimiter::new();
     let mut last_join_at: Option<Instant> = None;
 
-    // 主迴圈：用 select! 確保 send_task 死掉時也能退出
     let receive_loop = async {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             let text = match msg {
@@ -76,7 +78,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                 _ => continue,
             };
 
-            // 訊息大小限制
             if text.len() > MAX_MESSAGE_SIZE {
                 let _ = tx.try_send(ServerMessage::Error {
                     message: "訊息過大".into(),
@@ -84,7 +85,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                 continue;
             }
 
-            // 速率限制
             if !rate_limiter.allow() {
                 let _ = tx.try_send(ServerMessage::Error {
                     message: "訊息發送太頻繁，請稍後再試".into(),
@@ -102,7 +102,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                 }
             };
 
-            // 驗證輸入
             if let Err(e) = client_msg.validate() {
                 let _ = tx.try_send(ServerMessage::Error {
                     message: e.to_string(),
@@ -122,7 +121,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         continue;
                     }
 
-                    // C3: 全域玩家上限
                     if state.players.read().await.len() >= MAX_TOTAL_PLAYERS {
                         let _ = tx.try_send(ServerMessage::Error {
                             message: "伺服器已滿".into(),
@@ -154,14 +152,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         player_id: player_id.clone(),
                     });
 
-                    // 發送當前狀態
-                    let _ = tx.try_send(ServerMessage::PlayerUpdate {
-                        players: state.player_snapshot().await,
-                    });
-                    let _ = tx.try_send(ServerMessage::RoomUpdate {
-                        rooms: state.room_snapshot().await,
-                    });
-
+                    // broadcast_state 會發送完整快照給所有人（包含自己）
                     state.broadcast_state().await;
                 }
 
@@ -180,22 +171,26 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         continue;
                     }
 
-                    // C2: 一人一房
-                    let already_hosting = state
-                        .players
-                        .read()
-                        .await
-                        .get(&player_id)
-                        .map(|p| p.hosting_room.is_some())
-                        .unwrap_or(false);
-                    if already_hosting {
-                        let _ = tx.try_send(ServerMessage::Error {
-                            message: "已有房間，請先關閉".into(),
-                        });
-                        continue;
-                    }
+                    // 一次 read lock：檢查是否已建房 + 取得建房所需資料
+                    let player_data = {
+                        let players = state.players.read().await;
+                        match players.get(&player_id) {
+                            Some(p) if p.hosting_room.is_some() => {
+                                let _ = tx.try_send(ServerMessage::Error {
+                                    message: "已有房間，請先關閉".into(),
+                                });
+                                None
+                            }
+                            Some(p) => Some((p.nickname.clone(), p.addr, p.war3_version)),
+                            None => None,
+                        }
+                    };
 
-                    // C2: 全域房間上限
+                    let (nickname, player_addr, war3_version) = match player_data {
+                        Some(data) => data,
+                        None => continue,
+                    };
+
                     if state.rooms.read().await.len() >= MAX_TOTAL_ROOMS {
                         let _ = tx.try_send(ServerMessage::Error {
                             message: "伺服器房間已滿".into(),
@@ -204,25 +199,17 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                     }
 
                     let room_id = Uuid::new_v4().to_string();
-                    let players = state.players.read().await;
-                    let player = match players.get(&player_id) {
-                        Some(p) => p,
-                        None => continue,
-                    };
-
                     let room = Room {
                         room_id: room_id.clone(),
                         host_player_id: player_id.clone(),
-                        host_nickname: player.nickname.clone(),
-                        host_addr: player.addr,
+                        host_nickname: nickname,
+                        host_addr: player_addr,
                         room_name,
                         map_name,
                         max_players,
                         current_players: 1,
-                        war3_version: player.war3_version,
+                        war3_version,
                     };
-
-                    drop(players);
 
                     info!(%room_id, "房間建立");
                     state.rooms.write().await.insert(room_id.clone(), room);
@@ -260,7 +247,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         continue;
                     }
 
-                    // C1: Join 冷卻（防 IP 列舉）
                     if let Some(last) = last_join_at
                         && last.elapsed() < JOIN_COOLDOWN
                     {
@@ -271,75 +257,60 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                     }
                     last_join_at = Some(Instant::now());
 
-                    let rooms = state.rooms.read().await;
-                    let room = match rooms.get(&room_id) {
-                        Some(r) => r,
+                    // 一次 rooms lock：提取所有需要的房間資料
+                    let room_data = {
+                        let rooms = state.rooms.read().await;
+                        rooms.get(&room_id).map(|r| {
+                            (
+                                r.host_player_id.clone(),
+                                r.host_addr.ip().to_string(),
+                                r.war3_version,
+                                r.current_players >= r.max_players,
+                            )
+                        })
+                    };
+
+                    let (host_player_id, host_ip, room_version, room_full) = match room_data {
+                        Some(data) => data,
                         None => {
-                            let _ = tx.try_send(ServerMessage::JoinResult {
-                                success: false,
-                                host_ip: None,
-                            });
+                            let _ = tx.try_send(ServerMessage::join_failure());
                             continue;
                         }
                     };
 
-                    // H4/C1: 版本檢查
-                    let joiner_version = state
-                        .players
-                        .read()
-                        .await
-                        .get(&player_id)
-                        .map(|p| p.war3_version);
-                    if joiner_version != Some(room.war3_version) {
-                        let _ = tx.try_send(ServerMessage::JoinResult {
-                            success: false,
-                            host_ip: None,
-                        });
-                        drop(rooms);
+                    // 一次 players lock：版本檢查 + 房主在線 + 取得暱稱 + 通知房主
+                    let players = state.players.read().await;
+
+                    let joiner = match players.get(&player_id) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+
+                    if joiner.war3_version != room_version {
+                        let _ = tx.try_send(ServerMessage::join_failure());
                         continue;
                     }
 
-                    // C1: 房間人數檢查
-                    if room.current_players >= room.max_players {
-                        let _ = tx.try_send(ServerMessage::JoinResult {
-                            success: false,
-                            host_ip: None,
-                        });
-                        drop(rooms);
+                    if room_full {
+                        let _ = tx.try_send(ServerMessage::join_failure());
                         continue;
                     }
 
-                    // M4: 檢查房主是否仍在線
-                    let host_online = state
-                        .players
-                        .read()
-                        .await
-                        .get(&room.host_player_id)
+                    let host_online = players
+                        .get(&host_player_id)
                         .map(|p| p.disconnected_at.is_none())
                         .unwrap_or(false);
                     if !host_online {
-                        let _ = tx.try_send(ServerMessage::JoinResult {
-                            success: false,
-                            host_ip: None,
-                        });
-                        drop(rooms);
+                        let _ = tx.try_send(ServerMessage::join_failure());
                         continue;
                     }
-
-                    let host_ip = room.host_addr.ip().to_string();
-                    let host_player_id = room.host_player_id.clone();
-                    drop(rooms);
 
                     let _ = tx.try_send(ServerMessage::JoinResult {
                         success: true,
                         host_ip: Some(host_ip),
                     });
 
-                    let players = state.players.read().await;
-                    let joiner_nickname = players
-                        .get(&player_id)
-                        .map(|p| p.nickname.clone())
-                        .unwrap_or_default();
+                    let joiner_nickname = joiner.nickname.clone();
                     let joiner_ip = addr.ip().to_string();
 
                     if let Some(host) = players.get(&host_player_id) {
@@ -355,7 +326,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
         }
     };
 
-    // H2: select! 確保 send_task 或 receive_loop 任一結束都退出
     tokio::select! {
         _ = send_task => {
             warn!(%player_id, "send task 結束");
@@ -363,7 +333,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
         _ = receive_loop => {}
     }
 
-    // 斷線：標記 grace period 而非立刻移除
     if registered {
         info!(%player_id, "玩家斷線，進入 grace period");
         state.mark_disconnected(&player_id).await;

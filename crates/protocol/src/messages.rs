@@ -74,6 +74,15 @@ pub struct RoomInfo {
     pub war3_version: War3Version,
 }
 
+impl ServerMessage {
+    pub fn join_failure() -> Self {
+        ServerMessage::JoinResult {
+            success: false,
+            host_ip: None,
+        }
+    }
+}
+
 impl ClientMessage {
     /// 驗證訊息欄位長度
     pub fn validate(&self) -> Result<(), &'static str> {
