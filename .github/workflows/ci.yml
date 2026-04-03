@@ -89,3 +89,33 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: target/release/war3-server
+
+  deploy:
+    if: github.ref == 'refs/heads/master'
+    needs: [check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build server (release)
+        run: cargo build --release --package war3-server
+
+      - name: Deploy to VPS
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          scp -i ~/.ssh/deploy_key target/release/war3-server "$DEPLOY_USER@$DEPLOY_HOST:/tmp/war3-server"
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" '
+            sudo mv /tmp/war3-server /opt/war3/war3-server
+            sudo chmod +x /opt/war3/war3-server
+            sudo systemctl restart war3-server
+          '
