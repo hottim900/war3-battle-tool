@@ -1,14 +1,13 @@
 use eframe::egui;
 use tokio::sync::mpsc;
-use war3_protocol::messages::{PlayerInfo, RoomInfo, ServerMessage};
+use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo, ServerMessage};
 
 use crate::config::AppConfig;
-use crate::net::discovery::{NetEvent, UiCommand};
+use crate::net::discovery::NetEvent;
 use crate::ui::lobby::LobbyPanel;
 use crate::ui::log_panel::LogPanel;
 use crate::ui::setup_wizard::SetupWizard;
 
-/// 主要頁籤
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Tab {
     Lobby,
@@ -16,7 +15,6 @@ enum Tab {
     Log,
 }
 
-/// 連線狀態
 #[derive(Debug, Clone)]
 enum ConnectionState {
     Disconnected,
@@ -28,21 +26,15 @@ pub struct War3App {
     config: AppConfig,
     config_changed: bool,
 
-    // 網路通道
-    cmd_tx: mpsc::UnboundedSender<UiCommand>,
+    cmd_tx: mpsc::UnboundedSender<ClientMessage>,
     event_rx: mpsc::UnboundedReceiver<NetEvent>,
 
-    // 連線狀態
     connection_state: ConnectionState,
     my_player_id: Option<String>,
-    registered: bool,
 
-    // 遊戲資料
     players: Vec<PlayerInfo>,
     rooms: Vec<RoomInfo>,
-    is_hosting: bool,
 
-    // UI 元件
     current_tab: Tab,
     wizard: Option<SetupWizard>,
     lobby: LobbyPanel,
@@ -53,7 +45,7 @@ impl War3App {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         config: AppConfig,
-        cmd_tx: mpsc::UnboundedSender<UiCommand>,
+        cmd_tx: mpsc::UnboundedSender<ClientMessage>,
         event_rx: mpsc::UnboundedReceiver<NetEvent>,
     ) -> Self {
         setup_cjk_fonts(&cc.egui_ctx);
@@ -67,10 +59,8 @@ impl War3App {
             event_rx,
             connection_state: ConnectionState::Disconnected,
             my_player_id: None,
-            registered: false,
             players: Vec::new(),
             rooms: Vec::new(),
-            is_hosting: false,
             current_tab: Tab::Lobby,
             wizard: if needs_wizard {
                 Some(SetupWizard::new())
@@ -85,6 +75,28 @@ impl War3App {
         app
     }
 
+    fn is_registered(&self) -> bool {
+        self.my_player_id.is_some()
+    }
+
+    fn is_hosting(&self) -> bool {
+        self.my_player_id
+            .as_ref()
+            .map(|my_id| {
+                self.players
+                    .iter()
+                    .any(|p| p.player_id == *my_id && p.is_hosting)
+            })
+            .unwrap_or(false)
+    }
+
+    fn send_register(&self) {
+        let _ = self.cmd_tx.send(ClientMessage::Register {
+            nickname: self.config.nickname.clone(),
+            war3_version: self.config.war3_version,
+        });
+    }
+
     fn process_network_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -92,19 +104,13 @@ impl War3App {
                     self.connection_state = ConnectionState::Connected;
                     self.log_panel.info("已連線到發現伺服器");
 
-                    // 自動註冊
-                    if !self.registered && self.config.is_configured() {
-                        let _ = self.cmd_tx.send(UiCommand::Register {
-                            nickname: self.config.nickname.clone(),
-                            war3_version: self.config.war3_version,
-                        });
+                    if !self.is_registered() && self.config.is_configured() {
+                        self.send_register();
                     }
                 }
                 NetEvent::Disconnected => {
                     self.connection_state = ConnectionState::Disconnected;
-                    self.registered = false;
                     self.my_player_id = None;
-                    self.is_hosting = false;
                     self.log_panel.warn("與伺服器的連線中斷");
                 }
                 NetEvent::Reconnecting { attempt } => {
@@ -121,23 +127,12 @@ impl War3App {
         match msg {
             ServerMessage::Welcome { player_id } => {
                 self.my_player_id = Some(player_id);
-                self.registered = true;
                 self.log_panel.info("註冊成功");
             }
             ServerMessage::PlayerUpdate { players } => {
                 self.players = players;
             }
             ServerMessage::RoomUpdate { rooms } => {
-                // 檢查自己是否還在 hosting
-                self.is_hosting = self
-                    .my_player_id
-                    .as_ref()
-                    .map(|my_id| {
-                        self.players
-                            .iter()
-                            .any(|p| p.player_id == *my_id && p.is_hosting)
-                    })
-                    .unwrap_or(false);
                 self.rooms = rooms;
             }
             ServerMessage::JoinResult { success, host_ip } => {
@@ -147,8 +142,7 @@ impl War3App {
                             .info(format!("加入成功！房主 IP: {ip}（請切換到 War3 區域網路畫面）"));
                     }
                 } else {
-                    self.log_panel
-                        .error("加入失敗，房間可能已關閉。");
+                    self.log_panel.error("加入失敗，房間可能已關閉。");
                 }
             }
             ServerMessage::PlayerJoined {
@@ -193,7 +187,8 @@ impl War3App {
 
             if let Some(id) = &self.my_player_id {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak(format!("ID: {}…", &id[..8]));
+                    let short_id = id.get(..8).unwrap_or(id);
+                    ui.weak(format!("ID: {short_id}…"));
                 });
             }
         });
@@ -202,7 +197,6 @@ impl War3App {
 
 impl eframe::App for War3App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 處理網路事件
         self.process_network_events();
 
         // 首次設定精靈
@@ -214,15 +208,10 @@ impl eframe::App for War3App {
                 let _ = self.config.save();
                 self.wizard = None;
 
-                // 觸發註冊
                 if matches!(self.connection_state, ConnectionState::Connected) {
-                    let _ = self.cmd_tx.send(UiCommand::Register {
-                        nickname: self.config.nickname.clone(),
-                        war3_version: self.config.war3_version,
-                    });
+                    self.send_register();
                 }
             }
-            // 持續 repaint 以接收網路事件
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
             return;
         }
@@ -240,14 +229,20 @@ impl eframe::App for War3App {
             self.show_status_bar(ui);
         });
 
+        let is_hosting = self.is_hosting();
         egui::CentralPanel::default().show(ctx, |ui| match self.current_tab {
             Tab::Lobby => {
+                let my_nickname = if self.config.is_configured() {
+                    Some(self.config.nickname.as_str())
+                } else {
+                    None
+                };
                 self.lobby.show(
                     ui,
                     &self.rooms,
                     &self.players,
-                    self.my_player_id.as_deref(),
-                    self.is_hosting,
+                    my_nickname,
+                    is_hosting,
                     &self.cmd_tx,
                 );
             }
@@ -259,7 +254,6 @@ impl eframe::App for War3App {
             }
         });
 
-        // 定期 repaint 以接收網路事件
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
@@ -273,7 +267,6 @@ fn setup_cjk_fonts(ctx: &egui::Context) {
         std::sync::Arc::new(egui::FontData::from_static(font_data)),
     );
 
-    // 加到 Proportional 和 Monospace 的第一順位
     fonts
         .families
         .entry(egui::FontFamily::Proportional)

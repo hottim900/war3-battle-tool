@@ -79,9 +79,8 @@ impl AppState {
     /// 廣播訊息給所有玩家
     pub async fn broadcast(&self, msg: &ServerMessage) {
         let players = self.players.read().await;
-        let json = serde_json::to_string(msg).unwrap();
         for player in players.values() {
-            let _ = player.tx.send(serde_json::from_str(&json).unwrap());
+            let _ = player.tx.send(msg.clone());
         }
     }
 

@@ -35,20 +35,11 @@ impl SetupWizard {
                         ui.end_row();
 
                         ui.label("War3 版本：");
-                        egui::ComboBox::from_id_salt("version_select")
-                            .selected_text(self.war3_version.as_str())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.war3_version,
-                                    War3Version::V127,
-                                    "1.27",
-                                );
-                                ui.selectable_value(
-                                    &mut self.war3_version,
-                                    War3Version::V129c,
-                                    "1.29c",
-                                );
-                            });
+                        crate::ui::war3_version_combo(
+                            ui,
+                            "version_select",
+                            &mut self.war3_version,
+                        );
                         ui.end_row();
                     });
 

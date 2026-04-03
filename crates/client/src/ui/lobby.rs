@@ -1,7 +1,7 @@
 use eframe::egui;
 use war3_protocol::messages::{PlayerInfo, RoomInfo};
 
-use crate::net::discovery::UiCommand;
+use war3_protocol::messages::ClientMessage;
 
 /// 大廳畫面：上方房間列表，下方線上玩家
 pub struct LobbyPanel {
@@ -27,9 +27,9 @@ impl LobbyPanel {
         ui: &mut egui::Ui,
         rooms: &[RoomInfo],
         players: &[PlayerInfo],
-        my_player_id: Option<&str>,
+        my_nickname: Option<&str>,
         is_hosting: bool,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<UiCommand>,
+        cmd_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
     ) {
         // 房間區塊
         ui.heading("房間列表");
@@ -64,14 +64,14 @@ impl LobbyPanel {
                                     room.current_players, room.max_players
                                 ));
 
-                                let is_mine = my_player_id
-                                    .map(|id| room.host_nickname == id)
+                                let is_mine = my_nickname
+                                    .map(|name| room.host_nickname == name)
                                     .unwrap_or(false);
 
                                 if is_mine {
                                     ui.label("(你的房間)");
                                 } else if ui.button("加入").clicked() {
-                                    let _ = cmd_tx.send(UiCommand::JoinRoom {
+                                    let _ = cmd_tx.send(ClientMessage::JoinRoom {
                                         room_id: room.room_id.clone(),
                                     });
                                 }
@@ -87,7 +87,7 @@ impl LobbyPanel {
         ui.horizontal(|ui| {
             if is_hosting {
                 if ui.button("關閉房間").clicked() {
-                    let _ = cmd_tx.send(UiCommand::CloseRoom);
+                    let _ = cmd_tx.send(ClientMessage::CloseRoom);
                 }
             } else if ui.button("建立房間").clicked() {
                 self.show_create_dialog = true;
@@ -132,7 +132,7 @@ impl LobbyPanel {
     fn show_create_room_dialog(
         &mut self,
         ui: &mut egui::Ui,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<UiCommand>,
+        cmd_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
     ) {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.heading("建立房間");
@@ -162,7 +162,7 @@ impl LobbyPanel {
                     .add_enabled(can_create, egui::Button::new("建立"))
                     .clicked()
                 {
-                    let _ = cmd_tx.send(UiCommand::CreateRoom {
+                    let _ = cmd_tx.send(ClientMessage::CreateRoom {
                         room_name: self.create_room_name.clone(),
                         map_name: self.create_map_name.clone(),
                         max_players: self.create_max_players,

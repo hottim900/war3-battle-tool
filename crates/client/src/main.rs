@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 
 use app::War3App;
 use config::AppConfig;
-use net::discovery::{self, UiCommand, NetEvent};
+use net::discovery::{self, NetEvent};
+use war3_protocol::messages::ClientMessage;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -21,7 +22,7 @@ fn main() {
     let server_url = config.server_url.clone();
 
     // 建立 UI ↔ Network 通道
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ClientMessage>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<NetEvent>();
 
     // 在背景執行緒啟動 tokio runtime（必須在 eframe::run_native 之前）

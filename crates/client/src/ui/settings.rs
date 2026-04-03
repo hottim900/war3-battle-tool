@@ -1,5 +1,4 @@
 use eframe::egui;
-use war3_protocol::war3::War3Version;
 
 use crate::config::AppConfig;
 
@@ -20,12 +19,7 @@ pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool
 
             ui.label("War3 版本：");
             let prev = config.war3_version;
-            egui::ComboBox::from_id_salt("settings_version")
-                .selected_text(config.war3_version.as_str())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut config.war3_version, War3Version::V127, "1.27");
-                    ui.selectable_value(&mut config.war3_version, War3Version::V129c, "1.29c");
-                });
+            crate::ui::war3_version_combo(ui, "settings_version", &mut config.war3_version);
             if config.war3_version != prev {
                 *config_changed = true;
             }
@@ -44,5 +38,12 @@ pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool
             egui::Color32::from_rgb(255, 200, 100),
             "設定已修改，重新連線後生效。",
         );
+        if ui.button("儲存設定").clicked() {
+            if let Err(e) = config.save() {
+                tracing::error!("儲存設定失敗: {e}");
+            } else {
+                *config_changed = false;
+            }
+        }
     }
 }
