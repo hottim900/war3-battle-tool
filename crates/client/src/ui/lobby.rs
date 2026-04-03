@@ -3,6 +3,13 @@ use war3_protocol::messages::{PlayerInfo, RoomInfo};
 
 use war3_protocol::messages::ClientMessage;
 
+/// Action returned from `LobbyPanel::show` so the app can track pending state.
+pub enum LobbyAction {
+    None,
+    JoinRoom { room_name: String },
+    CreateRoom { room_name: String },
+}
+
 /// 大廳畫面：上方房間列表，下方線上玩家
 pub struct LobbyPanel {
     // 建房表單
@@ -30,7 +37,9 @@ impl LobbyPanel {
         my_nickname: Option<&str>,
         is_hosting: bool,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
-    ) {
+    ) -> LobbyAction {
+        let mut action = LobbyAction::None;
+
         // 房間區塊
         ui.heading("房間列表");
         ui.separator();
@@ -74,6 +83,9 @@ impl LobbyPanel {
                                     let _ = cmd_tx.send(ClientMessage::JoinRoom {
                                         room_id: room.room_id.clone(),
                                     });
+                                    action = LobbyAction::JoinRoom {
+                                        room_name: room.room_name.clone(),
+                                    };
                                 }
                                 ui.end_row();
                             }
@@ -96,7 +108,11 @@ impl LobbyPanel {
 
         // 建房對話框
         if self.show_create_dialog {
-            self.show_create_room_dialog(ui, cmd_tx);
+            if let Some(created_name) = self.show_create_room_dialog(ui, cmd_tx) {
+                action = LobbyAction::CreateRoom {
+                    room_name: created_name,
+                };
+            }
         }
 
         ui.add_space(20.0);
@@ -127,13 +143,19 @@ impl LobbyPanel {
                     }
                 });
         }
+
+        action
     }
 
+    /// Shows the create-room dialog. Returns `Some(room_name)` when the user
+    /// confirms creation, `None` otherwise.
     fn show_create_room_dialog(
         &mut self,
         ui: &mut egui::Ui,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
-    ) {
+    ) -> Option<String> {
+        let mut created_name: Option<String> = None;
+
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.heading("建立房間");
             ui.add_space(8.0);
@@ -162,6 +184,7 @@ impl LobbyPanel {
                     .add_enabled(can_create, egui::Button::new("建立"))
                     .clicked()
                 {
+                    created_name = Some(self.create_room_name.clone());
                     let _ = cmd_tx.send(ClientMessage::CreateRoom {
                         room_name: self.create_room_name.clone(),
                         map_name: self.create_map_name.clone(),
@@ -176,5 +199,7 @@ impl LobbyPanel {
                 }
             });
         });
+
+        created_name
     }
 }

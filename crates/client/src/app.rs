@@ -25,6 +25,19 @@ enum ConnectionState {
     Reconnecting { attempt: u32 },
 }
 
+/// Tracks an in-flight user action awaiting server confirmation.
+#[derive(Debug, Clone)]
+enum PendingAction {
+    /// User clicked "join" on a room; waiting for JoinResult.
+    Joining { room_name: String },
+    /// JoinResult succeeded; tell user to switch to War3 LAN screen.
+    JoinSuccess,
+    /// JoinResult failed; show error.
+    JoinFailed { reason: String },
+    /// User clicked "create room"; waiting for RoomUpdate to confirm.
+    CreatingRoom { room_name: String },
+}
+
 pub struct War3App {
     config: AppConfig,
     config_changed: bool,
@@ -34,6 +47,9 @@ pub struct War3App {
     packet_sender: Option<Arc<dyn PacketSender>>,
 
     connection_state: ConnectionState,
+    /// Whether we have ever successfully connected (used to distinguish
+    /// initial "connecting" from post-disconnect "reconnecting").
+    ever_connected: bool,
     my_player_id: Option<String>,
 
     players: Vec<PlayerInfo>,
@@ -43,6 +59,12 @@ pub struct War3App {
     wizard: Option<SetupWizard>,
     lobby: LobbyPanel,
     log_panel: LogPanel,
+
+    /// In-flight action feedback (join / create room).
+    pending_action: Option<PendingAction>,
+    /// Manual IP text field shown in offline-fallback mode.
+    #[allow(dead_code)]
+    manual_ip: String,
 }
 
 impl War3App {
@@ -64,6 +86,7 @@ impl War3App {
             event_rx,
             packet_sender,
             connection_state: ConnectionState::Disconnected,
+            ever_connected: false,
             my_player_id: None,
             players: Vec::new(),
             rooms: Vec::new(),
@@ -75,6 +98,8 @@ impl War3App {
             },
             lobby: LobbyPanel::new(),
             log_panel: LogPanel::new(),
+            pending_action: None,
+            manual_ip: String::new(),
         };
 
         app.log_panel.info("War3 Battle Tool 啟動");
@@ -162,6 +187,7 @@ impl War3App {
             match event {
                 NetEvent::Connected => {
                     self.connection_state = ConnectionState::Connected;
+                    self.ever_connected = true;
                     self.log_panel.info("已連線到發現伺服器");
 
                     if !self.is_registered() && self.config.is_configured() {
@@ -193,16 +219,24 @@ impl War3App {
                 self.players = players;
             }
             ServerMessage::RoomUpdate { rooms } => {
+                // Clear "creating room" pending state once the server confirms
+                if matches!(self.pending_action, Some(PendingAction::CreatingRoom { .. })) {
+                    self.pending_action = None;
+                }
                 self.rooms = rooms;
             }
             ServerMessage::JoinResult { success, host_ip } => {
                 if success {
+                    self.pending_action = Some(PendingAction::JoinSuccess);
                     if let Some(ip) = host_ip {
                         self.log_panel
                             .info(format!("取得房主 IP: {ip}，正在注入封包..."));
                         self.try_inject_join(&ip);
                     }
                 } else {
+                    self.pending_action = Some(PendingAction::JoinFailed {
+                        reason: "房間可能已關閉".to_string(),
+                    });
                     self.log_panel.error("加入失敗，房間可能已關閉。");
                 }
             }
@@ -216,6 +250,145 @@ impl War3App {
             }
             ServerMessage::Error { message } => {
                 self.log_panel.error(format!("伺服器錯誤: {message}"));
+            }
+        }
+    }
+
+    /// Returns true if the connection state requires a full-screen overlay
+    /// (i.e. the lobby should NOT be shown).
+    #[allow(dead_code)]
+    fn show_connection_overlay(&mut self, ui: &mut egui::Ui) -> bool {
+        match &self.connection_state {
+            ConnectionState::Connected => false,
+            ConnectionState::Disconnected if !self.ever_connected => {
+                // Initial startup: haven't connected yet
+                ui.vertical_centered(|ui| {
+                    ui.add_space(80.0);
+                    ui.spinner();
+                    ui.add_space(12.0);
+                    ui.heading("正在連線發現伺服器...");
+                });
+                true
+            }
+            ConnectionState::Disconnected => {
+                // Was connected before, now disconnected (terminal)
+                false
+            }
+            ConnectionState::Reconnecting { attempt } if *attempt > 5 => {
+                let attempt = *attempt;
+                // Offline fallback mode
+                ui.vertical_centered(|ui| {
+                    ui.add_space(60.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 200, 100),
+                        egui::RichText::new("離線模式").size(20.0).strong(),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(format!(
+                        "已嘗試重新連線 {attempt} 次，伺服器可能離線。",
+                    ));
+                    ui.add_space(16.0);
+                    ui.label("你可以手動輸入房主 IP 加入區域網路遊戲：");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        let max_width = 200.0;
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.manual_ip)
+                                .hint_text("房主 IP 位址")
+                                .desired_width(max_width),
+                        );
+                        let valid = !self.manual_ip.trim().is_empty();
+                        if ui
+                            .add_enabled(valid, egui::Button::new("手動加入"))
+                            .clicked()
+                        {
+                            let ip = self.manual_ip.trim().to_string();
+                            self.log_panel.info(format!("手動加入: {ip}"));
+                            self.try_inject_join(&ip);
+                        }
+                    });
+                });
+                true
+            }
+            ConnectionState::Reconnecting { attempt } => {
+                // Still within retry window
+                ui.vertical_centered(|ui| {
+                    ui.add_space(80.0);
+                    ui.spinner();
+                    ui.add_space(12.0);
+                    ui.heading("連線中斷，正在重新連線...");
+                    ui.add_space(4.0);
+                    ui.label(format!("第 {} 次嘗試", attempt));
+                });
+                true
+            }
+        }
+    }
+
+    /// Shows pending action feedback (join / create room) as a banner at the
+    /// top of the lobby. Returns true if the banner was shown.
+    #[allow(dead_code)]
+    fn show_pending_action_banner(&mut self, ui: &mut egui::Ui) -> bool {
+        let action = match &self.pending_action {
+            Some(a) => a.clone(),
+            None => return false,
+        };
+
+        match &action {
+            PendingAction::Joining { room_name } => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("正在加入「{}」...", room_name));
+                });
+                ui.add_space(4.0);
+                true
+            }
+            PendingAction::JoinSuccess => {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_premultiplied(40, 100, 40, 200))
+                    .inner_margin(8.0)
+                    .corner_radius(4.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(100, 255, 100),
+                                "加入成功！請切換到 War3 區域網路畫面。",
+                            );
+                            if ui.button("確定").clicked() {
+                                self.pending_action = None;
+                            }
+                        });
+                    });
+                ui.add_space(4.0);
+                true
+            }
+            PendingAction::JoinFailed { reason } => {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_premultiplied(100, 40, 40, 200))
+                    .inner_margin(8.0)
+                    .corner_radius(4.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 100, 100),
+                                format!("加入失敗：{}", reason),
+                            );
+                            if ui.button("確定").clicked() {
+                                self.pending_action = None;
+                            }
+                        });
+                    });
+                ui.add_space(4.0);
+                true
+            }
+            PendingAction::CreatingRoom { room_name } => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("正在建立房間「{}」...", room_name));
+                });
+                ui.add_space(4.0);
+                true
             }
         }
     }
@@ -292,27 +465,47 @@ impl eframe::App for War3App {
         });
 
         let is_hosting = self.is_hosting();
-        egui::CentralPanel::default().show(ctx, |ui| match self.current_tab {
-            Tab::Lobby => {
-                let my_nickname = if self.config.is_configured() {
-                    Some(self.config.nickname.as_str())
-                } else {
-                    None
-                };
-                self.lobby.show(
-                    ui,
-                    &self.rooms,
-                    &self.players,
-                    my_nickname,
-                    is_hosting,
-                    &self.cmd_tx,
-                );
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if self.show_connection_overlay(ui) {
+                return;
             }
-            Tab::Settings => {
-                crate::ui::settings::show(ui, &mut self.config, &mut self.config_changed);
-            }
-            Tab::Log => {
-                self.log_panel.show(ui);
+
+            match self.current_tab {
+                Tab::Lobby => {
+                    self.show_pending_action_banner(ui);
+
+                    let my_nickname = if self.config.is_configured() {
+                        Some(self.config.nickname.as_str())
+                    } else {
+                        None
+                    };
+                    let action = self.lobby.show(
+                        ui,
+                        &self.rooms,
+                        &self.players,
+                        my_nickname,
+                        is_hosting,
+                        &self.cmd_tx,
+                    );
+                    use crate::ui::lobby::LobbyAction;
+                    match action {
+                        LobbyAction::JoinRoom { room_name } => {
+                            self.pending_action =
+                                Some(PendingAction::Joining { room_name });
+                        }
+                        LobbyAction::CreateRoom { room_name } => {
+                            self.pending_action =
+                                Some(PendingAction::CreatingRoom { room_name });
+                        }
+                        LobbyAction::None => {}
+                    }
+                }
+                Tab::Settings => {
+                    crate::ui::settings::show(ui, &mut self.config, &mut self.config_changed);
+                }
+                Tab::Log => {
+                    self.log_panel.show(ui);
+                }
             }
         });
 

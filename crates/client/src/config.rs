@@ -11,6 +11,13 @@ pub struct AppConfig {
     pub nickname: String,
     pub war3_version: War3Version,
     pub server_url: String,
+    /// 本地 IP，用於封包注入目標（loopback 或真實網卡 IP）
+    #[serde(default = "default_local_ip")]
+    pub local_ip: String,
+}
+
+fn default_local_ip() -> String {
+    "127.0.0.1".into()
 }
 
 impl Default for AppConfig {
@@ -19,6 +26,7 @@ impl Default for AppConfig {
             nickname: String::new(),
             war3_version: War3Version::V127,
             server_url: "ws://127.0.0.1:3000/ws".into(),
+            local_ip: default_local_ip(),
         }
     }
 }

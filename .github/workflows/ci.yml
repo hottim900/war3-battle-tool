@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [master]
+    tags: ["v*"]
   pull_request:
 
 env:
@@ -28,3 +29,56 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [check]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+
+  build-client:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [check]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build client (release)
+        run: cargo build --release --package war3-client
+
+      - name: Upload client binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/war3-client.exe
+
+  build-server:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [check]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build server (release)
+        run: cargo build --release --package war3-server
+
+      - name: Upload server binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/war3-server

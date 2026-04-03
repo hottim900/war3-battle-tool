@@ -1,7 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use tokio::sync::Semaphore;
 use war3_protocol::war3::{War3Version, WAR3_PORT};
 
 /// 封包注入的抽象層
@@ -40,6 +42,55 @@ pub fn check_room(host_ip: Ipv4Addr, version: War3Version) -> Result<Vec<u8>> {
         Ok((len, _)) => bail!("收到的回覆太短 ({len} bytes)"),
         Err(e) => bail!("沒有收到房間回覆: {e}"),
     }
+}
+
+/// 掃描 /24 子網路，找出有開房的 War3 主機（正常 UDP，不需要 npcap）
+///
+/// 對子網路中的每個 IP 呼叫 check_room，使用 tokio::Semaphore 限制同時連線數。
+/// 回傳有回應 game info 的 IP 及其回應資料。
+#[allow(dead_code)]
+pub async fn scan_rooms(
+    subnet: &str,
+    version: War3Version,
+) -> Result<Vec<(Ipv4Addr, Vec<u8>)>> {
+    let base_ip = parse_subnet_base(subnet)?;
+    let octets = base_ip.octets();
+
+    let semaphore = Arc::new(Semaphore::new(20));
+    let mut handles = Vec::with_capacity(254);
+
+    for i in 1..=254u8 {
+        let ip = Ipv4Addr::new(octets[0], octets[1], octets[2], i);
+        let permit = Arc::clone(&semaphore);
+
+        handles.push(tokio::spawn(async move {
+            let _permit = permit.acquire().await;
+            match check_room(ip, version) {
+                Ok(data) => Some((ip, data)),
+                Err(_) => None,
+            }
+        }));
+    }
+
+    let mut results = Vec::new();
+    for handle in handles {
+        if let Ok(Some(entry)) = handle.await {
+            results.push(entry);
+        }
+    }
+
+    Ok(results)
+}
+
+/// 解析 "/24" 子網路字串，取得基底 IP
+///
+/// 支援 "192.168.1.0/24" 或 "192.168.1.0" 格式。
+fn parse_subnet_base(subnet: &str) -> Result<Ipv4Addr> {
+    let ip_str = subnet.split('/').next().unwrap_or(subnet);
+    let ip: Ipv4Addr = ip_str
+        .parse()
+        .with_context(|| format!("無效的子網路位址: {subnet}"))?;
+    Ok(ip)
 }
 
 /// 把房主的 W3GS_GAMEINFO 回覆轉發到本地 War3（需要 spoofed source IP）

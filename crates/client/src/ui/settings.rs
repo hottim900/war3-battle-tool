@@ -30,6 +30,16 @@ pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool
                 *config_changed = true;
             }
             ui.end_row();
+
+            ui.label("本地 IP：");
+            if ui
+                .text_edit_singleline(&mut config.local_ip)
+                .on_hover_text("封包注入的目標 IP（通常為 127.0.0.1 或真實網卡 IP）")
+                .changed()
+            {
+                *config_changed = true;
+            }
+            ui.end_row();
         });
 
     ui.add_space(10.0);
