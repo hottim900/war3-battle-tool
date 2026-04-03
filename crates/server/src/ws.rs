@@ -50,10 +50,10 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
     let send_task = tokio::spawn(async move {
         use futures_util::SinkExt;
         while let Some(msg) = rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&msg) {
-                if ws_sender.send(Message::Text(json.into())).await.is_err() {
-                    break;
-                }
+            if let Ok(json) = serde_json::to_string(&msg)
+                && ws_sender.send(Message::Text(json.into())).await.is_err()
+            {
+                break;
             }
         }
     });
@@ -122,7 +122,11 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                     disconnected_at: None,
                 };
 
-                state.players.write().await.insert(player_id.clone(), player);
+                state
+                    .players
+                    .write()
+                    .await
+                    .insert(player_id.clone(), player);
                 registered = true;
 
                 let _ = tx.send(ServerMessage::Welcome {

@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use war3_protocol::messages::{PlayerInfo, RoomInfo, ServerMessage};
 use war3_protocol::war3::War3Version;
 

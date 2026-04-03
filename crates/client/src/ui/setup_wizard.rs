@@ -35,11 +35,7 @@ impl SetupWizard {
                         ui.end_row();
 
                         ui.label("War3 版本：");
-                        crate::ui::war3_version_combo(
-                            ui,
-                            "version_select",
-                            &mut self.war3_version,
-                        );
+                        crate::ui::war3_version_combo(ui, "version_select", &mut self.war3_version);
                         ui.end_row();
                     });
 

@@ -2,9 +2,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::sync::Semaphore;
-use war3_protocol::war3::{War3Version, WAR3_PORT};
+use war3_protocol::war3::{WAR3_PORT, War3Version};
 
 /// 封包注入的抽象層
 ///
@@ -49,10 +49,7 @@ pub fn check_room(host_ip: Ipv4Addr, version: War3Version) -> Result<Vec<u8>> {
 /// 對子網路中的每個 IP 呼叫 check_room，使用 tokio::Semaphore 限制同時連線數。
 /// 回傳有回應 game info 的 IP 及其回應資料。
 #[allow(dead_code)]
-pub async fn scan_rooms(
-    subnet: &str,
-    version: War3Version,
-) -> Result<Vec<(Ipv4Addr, Vec<u8>)>> {
+pub async fn scan_rooms(subnet: &str, version: War3Version) -> Result<Vec<(Ipv4Addr, Vec<u8>)>> {
     let base_ip = parse_subnet_base(subnet)?;
     let octets = base_ip.octets();
 
@@ -141,13 +138,7 @@ pub fn invite_player(
 ) -> Result<()> {
     let broadcast_data = version.broadcast_packet();
     for _ in 0..5 {
-        sender.send_spoofed_udp(
-            player_ip,
-            local_ip,
-            WAR3_PORT,
-            WAR3_PORT,
-            broadcast_data,
-        )?;
+        sender.send_spoofed_udp(player_ip, local_ip, WAR3_PORT, WAR3_PORT, broadcast_data)?;
     }
     Ok(())
 }
@@ -166,8 +157,7 @@ pub fn try_upnp_port_forward(port: u16) -> Result<()> {
         ..Default::default()
     };
 
-    let gateway =
-        igd_next::search_gateway(search_opts).context("找不到 UPnP 閘道器")?;
+    let gateway = igd_next::search_gateway(search_opts).context("找不到 UPnP 閘道器")?;
 
     // Discover local IP by connecting a UDP socket to the gateway
     let gw_addr = gateway.addr;

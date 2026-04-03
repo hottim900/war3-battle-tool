@@ -12,7 +12,7 @@
 //! 4. War3 已開啟並在 LAN 遊戲瀏覽畫面
 
 use std::net::Ipv4Addr;
-use war3_protocol::war3::{War3Version, WAR3_PORT};
+use war3_protocol::war3::{WAR3_PORT, War3Version};
 
 fn main() -> anyhow::Result<()> {
     let src_ip: Ipv4Addr = std::env::args()

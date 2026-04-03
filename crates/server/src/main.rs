@@ -5,10 +5,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use tokio::time::interval;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
@@ -89,9 +89,7 @@ fn spawn_cleanup_task(state: Arc<AppState>) {
         loop {
             tick.tick().await;
 
-            let expired = state
-                .cleanup_expired(HEARTBEAT_TIMEOUT, GRACE_PERIOD)
-                .await;
+            let expired = state.cleanup_expired(HEARTBEAT_TIMEOUT, GRACE_PERIOD).await;
 
             for player_id in expired {
                 warn!(%player_id, "玩家超時（心跳或 grace period），移除");

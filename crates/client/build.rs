@@ -25,7 +25,8 @@ fn main() {
 
     match status {
         Ok(s) if s.success() => {
-            let metadata = std::fs::metadata(font_path).expect("Font file not found after download");
+            let metadata =
+                std::fs::metadata(font_path).expect("Font file not found after download");
             if metadata.len() < 1_000_000 {
                 // Too small, probably an error page
                 std::fs::remove_file(font_path).ok();
@@ -37,7 +38,10 @@ fn main() {
                     FONT_URL
                 );
             }
-            eprintln!("Font downloaded successfully ({:.1}MB)", metadata.len() as f64 / 1_048_576.0);
+            eprintln!(
+                "Font downloaded successfully ({:.1}MB)",
+                metadata.len() as f64 / 1_048_576.0
+            );
         }
         _ => {
             panic!(

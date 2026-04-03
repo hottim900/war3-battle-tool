@@ -48,10 +48,7 @@ pub enum ServerMessage {
         host_ip: Option<String>,
     },
     /// 通知房主：有人加入，包含玩家的公開 IP
-    PlayerJoined {
-        nickname: String,
-        player_ip: String,
-    },
+    PlayerJoined { nickname: String, player_ip: String },
     /// 錯誤
     Error { message: String },
 }

@@ -68,10 +68,7 @@ impl LobbyPanel {
                                 ui.label(&room.room_name);
                                 ui.label(&room.host_nickname);
                                 ui.label(&room.map_name);
-                                ui.label(format!(
-                                    "{}/{}",
-                                    room.current_players, room.max_players
-                                ));
+                                ui.label(format!("{}/{}", room.current_players, room.max_players));
 
                                 let is_mine = my_nickname
                                     .map(|name| room.host_nickname == name)
@@ -107,12 +104,12 @@ impl LobbyPanel {
         });
 
         // 建房對話框
-        if self.show_create_dialog {
-            if let Some(created_name) = self.show_create_room_dialog(ui, cmd_tx) {
-                action = LobbyAction::CreateRoom {
-                    room_name: created_name,
-                };
-            }
+        if self.show_create_dialog
+            && let Some(created_name) = self.show_create_room_dialog(ui, cmd_tx)
+        {
+            action = LobbyAction::CreateRoom {
+                room_name: created_name,
+            };
         }
 
         ui.add_space(20.0);

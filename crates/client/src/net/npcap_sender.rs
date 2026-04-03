@@ -6,7 +6,7 @@
 mod platform {
     use std::net::Ipv4Addr;
 
-    use anyhow::{bail, Context, Result};
+    use anyhow::{Context, Result, bail};
     use pcap::{Capture, Device};
 
     use super::super::packet::PacketSender;
@@ -149,8 +149,7 @@ mod platform {
                 .open()
                 .context("無法啟動擷取")?;
 
-            cap.sendpacket(raw_packet)
-                .context("封包發送失敗")?;
+            cap.sendpacket(raw_packet).context("封包發送失敗")?;
 
             Ok(())
         }

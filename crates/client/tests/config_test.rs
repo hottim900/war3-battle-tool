@@ -56,7 +56,8 @@ fn config_handles_unknown_fields() {
         }
     }
 
-    let json = r#"{"nickname":"Test","war3_version":"1.27","server_url":"ws://x/ws","unknown_field":42}"#;
+    let json =
+        r#"{"nickname":"Test","war3_version":"1.27","server_url":"ws://x/ws","unknown_field":42}"#;
     let config: AppConfig = serde_json::from_str(json).unwrap();
     assert_eq!(config.nickname, "Test");
 }

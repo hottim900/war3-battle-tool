@@ -162,8 +162,7 @@ impl War3App {
                     .info("封包注入成功！請切換到 War3 區域網路畫面");
             }
             Err(e) => {
-                self.log_panel
-                    .error(format!("封包注入失敗: {e}"));
+                self.log_panel.error(format!("封包注入失敗: {e}"));
             }
         }
     }
@@ -226,7 +225,10 @@ impl War3App {
             }
             ServerMessage::RoomUpdate { rooms } => {
                 // Clear "creating room" pending state once the server confirms
-                if matches!(self.pending_action, Some(PendingAction::CreatingRoom { .. })) {
+                if matches!(
+                    self.pending_action,
+                    Some(PendingAction::CreatingRoom { .. })
+                ) {
                     self.pending_action = None;
                 }
                 self.rooms = rooms;
@@ -250,8 +252,9 @@ impl War3App {
                 nickname,
                 player_ip,
             } => {
-                self.log_panel
-                    .info(format!("玩家 {nickname} 加入，正在邀請... (IP: {player_ip})"));
+                self.log_panel.info(format!(
+                    "玩家 {nickname} 加入，正在邀請... (IP: {player_ip})"
+                ));
                 self.try_inject_invite(&player_ip);
             }
             ServerMessage::Error { message } => {
@@ -289,9 +292,7 @@ impl War3App {
                         egui::RichText::new("離線模式").size(20.0).strong(),
                     );
                     ui.add_space(8.0);
-                    ui.label(format!(
-                        "已嘗試重新連線 {attempt} 次，伺服器可能離線。",
-                    ));
+                    ui.label(format!("已嘗試重新連線 {attempt} 次，伺服器可能離線。",));
                     ui.add_space(16.0);
                     ui.label("你可以手動輸入房主 IP 加入區域網路遊戲：");
                     ui.add_space(8.0);
@@ -400,16 +401,13 @@ impl War3App {
     fn show_status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let (color, text) = match &self.connection_state {
-                ConnectionState::Connected => {
-                    (egui::Color32::from_rgb(100, 200, 100), "● 已連線")
-                }
+                ConnectionState::Connected => (egui::Color32::from_rgb(100, 200, 100), "● 已連線"),
                 ConnectionState::Disconnected => {
                     (egui::Color32::from_rgb(200, 100, 100), "● 已斷線")
                 }
-                ConnectionState::Reconnecting { attempt: _ } => (
-                    egui::Color32::from_rgb(255, 200, 100),
-                    "● 重連中...",
-                ),
+                ConnectionState::Reconnecting { attempt: _ } => {
+                    (egui::Color32::from_rgb(255, 200, 100), "● 重連中...")
+                }
             };
             ui.colored_label(color, text);
 
@@ -515,14 +513,11 @@ impl eframe::App for War3App {
                             war3_protocol::war3::WAR3_PORT,
                         ) {
                             tracing::warn!("UPnP 失敗，請確保 port 6112 已開放: {e}");
-                            self.log_panel.warn(
-                                "UPnP 失敗，請確保 port 6112 已開放",
-                            );
+                            self.log_panel.warn("UPnP 失敗，請確保 port 6112 已開放");
                         } else {
                             self.log_panel.info("UPnP port 映射成功");
                         }
-                        self.pending_action =
-                            Some(PendingAction::CreatingRoom { room_name });
+                        self.pending_action = Some(PendingAction::CreatingRoom { room_name });
                     }
                 }
             }
