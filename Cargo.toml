@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+default-members = ["crates/client", "crates/server", "crates/protocol"]
 resolver = "2"
 
 [workspace.package]

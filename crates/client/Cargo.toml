@@ -11,3 +11,13 @@ tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+eframe = "0.31"
+dirs = "6"
+futures-util = "0.3"
+tokio-tungstenite = "0.26"
+chrono = "0.4"
+open = "5"
+igd-next = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+pcap = "2"

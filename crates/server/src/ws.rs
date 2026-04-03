@@ -10,6 +10,37 @@ use war3_protocol::messages::{ClientMessage, ServerMessage};
 
 use crate::state::{AppState, ConnectedPlayer, Room};
 
+const MAX_MESSAGES_PER_SECOND: u32 = 10;
+
+/// 簡單的 token bucket 速率限制器
+struct RateLimiter {
+    tokens: u32,
+    last_refill: Instant,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            tokens: MAX_MESSAGES_PER_SECOND,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn allow(&mut self) -> bool {
+        let elapsed = self.last_refill.elapsed().as_secs_f64();
+        if elapsed >= 1.0 {
+            self.tokens = MAX_MESSAGES_PER_SECOND;
+            self.last_refill = Instant::now();
+        }
+        if self.tokens > 0 {
+            self.tokens -= 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// 處理單個 WebSocket 連線
 pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppState>) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -29,6 +60,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
 
     let player_id = Uuid::new_v4().to_string();
     let mut registered = false;
+    let mut rate_limiter = RateLimiter::new();
 
     // 主迴圈：處理收到的訊息
     use futures_util::StreamExt;
@@ -38,6 +70,14 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
             Message::Close(_) => break,
             _ => continue,
         };
+
+        // 速率限制
+        if !rate_limiter.allow() {
+            let _ = tx.send(ServerMessage::Error {
+                message: "訊息發送太頻繁，請稍後再試".into(),
+            });
+            continue;
+        }
 
         let client_msg: ClientMessage = match serde_json::from_str(&text) {
             Ok(m) => m,
@@ -79,6 +119,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                     last_heartbeat: Instant::now(),
                     tx: tx.clone(),
                     hosting_room: None,
+                    disconnected_at: None,
                 };
 
                 state.players.write().await.insert(player_id.clone(), player);
@@ -187,13 +228,11 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                 let host_player_id = room.host_player_id.clone();
                 drop(rooms);
 
-                // 發送房主 IP 給加入的玩家
                 let _ = tx.send(ServerMessage::JoinResult {
                     success: true,
                     host_ip: Some(host_ip),
                 });
 
-                // 通知房主：有人加入（含玩家 IP）
                 let players = state.players.read().await;
                 let joiner_nickname = players
                     .get(&player_id)
@@ -213,10 +252,11 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
         }
     }
 
-    // 清理
+    // 斷線：標記 grace period 而非立刻移除
     if registered {
-        info!(%player_id, "玩家離線");
-        state.remove_player(&player_id).await;
+        info!(%player_id, "玩家斷線，進入 grace period");
+        state.mark_disconnected(&player_id).await;
+        state.broadcast_state().await;
     }
 
     send_task.abort();

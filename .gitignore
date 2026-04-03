@@ -2,3 +2,12 @@
 *.exe
 *.log
 .gstack/
+crates/client/assets/NotoSansTC-Regular.otf
+
+# Test artifacts
+*.bin
+*.hex
+inject_npcap.py
+inject_packet.bin
+spike-output.txt
+inject-output.txt

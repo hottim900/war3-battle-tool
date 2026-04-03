@@ -1,0 +1,9 @@
+[package]
+name = "spike-packet"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+war3-protocol = { path = "../protocol" }
+pcap = "2"
+anyhow.workspace = true
