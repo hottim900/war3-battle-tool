@@ -256,7 +256,6 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                         });
                         continue;
                     }
-                    last_join_at = Some(Instant::now());
 
                     let room_data = {
                         let rooms = state.rooms.read().await;
@@ -310,7 +309,7 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                     });
 
                     let joiner_nickname = joiner.nickname.clone();
-                    let joiner_ip = client_ip.to_string();
+                    let joiner_ip = joiner.client_ip.to_string();
 
                     if let Some(host) = players.get(&host_player_id) {
                         let _ = host.tx.try_send(ServerMessage::PlayerJoined {
@@ -321,14 +320,31 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
 
                     drop(players);
 
-                    // 更新房間人數 + 記錄玩家加入的房間
+                    // 先寫 joined_room（清舊房 + 設新房），再 increment room count
+                    // 順序確保 remove_player 能正確 decrement
+                    {
+                        let mut players = state.players.write().await;
+                        if let Some(player) = players.get_mut(&player_id) {
+                            let old_room = player.joined_room.replace(room_id.clone());
+                            // 離開舊房間：decrement count
+                            if let Some(old_id) = old_room {
+                                drop(players);
+                                if let Some(room) =
+                                    state.rooms.write().await.get_mut(&old_id)
+                                {
+                                    room.current_players =
+                                        room.current_players.saturating_sub(1);
+                                }
+                            } else {
+                                drop(players);
+                            }
+                        }
+                    }
                     if let Some(room) = state.rooms.write().await.get_mut(&room_id) {
                         room.current_players = room.current_players.saturating_add(1);
                     }
-                    if let Some(player) = state.players.write().await.get_mut(&player_id) {
-                        player.joined_room = Some(room_id.clone());
-                    }
 
+                    last_join_at = Some(Instant::now());
                     info!(%room_id, %player_id, "玩家加入房間");
                     state.broadcast_state().await;
                 }

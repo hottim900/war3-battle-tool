@@ -59,13 +59,17 @@ async fn main() {
     .unwrap();
 }
 
-/// 從 X-Real-IP header 取得真實 IP（nginx 從 CF-Connecting-IP 轉發）
+/// 從 X-Real-IP header 取得真實 IP，僅信任來自 loopback 的連線（nginx）
 fn real_ip(headers: &HeaderMap, fallback: SocketAddr) -> IpAddr {
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<IpAddr>().ok())
-        .unwrap_or_else(|| fallback.ip())
+    if fallback.ip().is_loopback() {
+        headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<IpAddr>().ok())
+            .unwrap_or_else(|| fallback.ip())
+    } else {
+        fallback.ip()
+    }
 }
 
 async fn ws_handler(
