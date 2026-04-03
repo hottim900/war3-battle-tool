@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,7 +46,7 @@ impl RateLimiter {
 }
 
 /// 處理單個 WebSocket 連線
-pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppState>) {
+pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppState>) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
 
@@ -128,16 +128,17 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         continue;
                     }
 
-                    info!(%addr, %nickname, %war3_version, "玩家上線");
+                    info!(%client_ip, %nickname, %war3_version, "玩家上線");
 
                     let player = ConnectedPlayer {
                         player_id: player_id.clone(),
                         nickname,
                         war3_version,
-                        addr,
+                        client_ip,
                         last_heartbeat: Instant::now(),
                         tx: tx.clone(),
                         hosting_room: None,
+                        joined_room: None,
                         disconnected_at: None,
                     };
 
@@ -152,7 +153,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         player_id: player_id.clone(),
                     });
 
-                    // broadcast_state 會發送完整快照給所有人（包含自己）
                     state.broadcast_state().await;
                 }
 
@@ -171,7 +171,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         continue;
                     }
 
-                    // 一次 read lock：檢查是否已建房 + 取得建房所需資料
                     let player_data = {
                         let players = state.players.read().await;
                         match players.get(&player_id) {
@@ -181,12 +180,14 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                                 });
                                 None
                             }
-                            Some(p) => Some((p.nickname.clone(), p.addr, p.war3_version)),
+                            Some(p) => {
+                                Some((p.nickname.clone(), p.client_ip, p.war3_version))
+                            }
                             None => None,
                         }
                     };
 
-                    let (nickname, player_addr, war3_version) = match player_data {
+                    let (nickname, player_ip, war3_version) = match player_data {
                         Some(data) => data,
                         None => continue,
                     };
@@ -203,7 +204,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         room_id: room_id.clone(),
                         host_player_id: player_id.clone(),
                         host_nickname: nickname,
-                        host_addr: player_addr,
+                        host_ip: player_ip,
                         room_name,
                         map_name,
                         max_players,
@@ -257,13 +258,12 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                     }
                     last_join_at = Some(Instant::now());
 
-                    // 一次 rooms lock：提取所有需要的房間資料
                     let room_data = {
                         let rooms = state.rooms.read().await;
                         rooms.get(&room_id).map(|r| {
                             (
                                 r.host_player_id.clone(),
-                                r.host_addr.ip().to_string(),
+                                r.host_ip.to_string(),
                                 r.war3_version,
                                 r.current_players >= r.max_players,
                             )
@@ -278,7 +278,6 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                         }
                     };
 
-                    // 一次 players lock：版本檢查 + 房主在線 + 取得暱稱 + 通知房主
                     let players = state.players.read().await;
 
                     let joiner = match players.get(&player_id) {
@@ -311,7 +310,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                     });
 
                     let joiner_nickname = joiner.nickname.clone();
-                    let joiner_ip = addr.ip().to_string();
+                    let joiner_ip = client_ip.to_string();
 
                     if let Some(host) = players.get(&host_player_id) {
                         let _ = host.tx.try_send(ServerMessage::PlayerJoined {
@@ -322,9 +321,12 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
 
                     drop(players);
 
-                    // 更新房間人數
+                    // 更新房間人數 + 記錄玩家加入的房間
                     if let Some(room) = state.rooms.write().await.get_mut(&room_id) {
                         room.current_players = room.current_players.saturating_add(1);
+                    }
+                    if let Some(player) = state.players.write().await.get_mut(&player_id) {
+                        player.joined_room = Some(room_id.clone());
                     }
 
                     info!(%room_id, %player_id, "玩家加入房間");
