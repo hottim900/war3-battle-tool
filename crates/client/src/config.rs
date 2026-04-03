@@ -25,7 +25,8 @@ impl Default for AppConfig {
         Self {
             nickname: String::new(),
             war3_version: War3Version::V127,
-            server_url: "ws://127.0.0.1:3000/ws".into(),
+            server_url: std::env::var("SERVER_URL")
+                .unwrap_or_else(|_| "ws://127.0.0.1:3000/ws".into()),
             local_ip: default_local_ip(),
         }
     }

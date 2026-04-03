@@ -42,7 +42,11 @@ async fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let bind_addr: std::net::IpAddr = std::env::var("BIND")
+        .ok()
+        .and_then(|b| b.parse().ok())
+        .unwrap_or_else(|| [0, 0, 0, 0].into());
+    let addr = SocketAddr::from((bind_addr, port));
     info!("War3 發現伺服器啟動於 {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
