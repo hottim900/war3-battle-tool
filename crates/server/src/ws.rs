@@ -11,6 +11,7 @@ use war3_protocol::messages::{ClientMessage, ServerMessage};
 use crate::state::{AppState, ConnectedPlayer, Room};
 
 const MAX_MESSAGES_PER_SECOND: u32 = 10;
+const MAX_MESSAGE_SIZE: usize = 4096;
 
 /// 簡單的 token bucket 速率限制器
 struct RateLimiter {
@@ -44,7 +45,7 @@ impl RateLimiter {
 /// 處理單個 WebSocket 連線
 pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppState>) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
 
     // 背景任務：從 channel 讀取訊息送到 WebSocket
     let send_task = tokio::spawn(async move {
@@ -71,9 +72,17 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
             _ => continue,
         };
 
+        // 訊息大小限制
+        if text.len() > MAX_MESSAGE_SIZE {
+            let _ = tx.try_send(ServerMessage::Error {
+                message: "訊息過大".into(),
+            });
+            continue;
+        }
+
         // 速率限制
         if !rate_limiter.allow() {
-            let _ = tx.send(ServerMessage::Error {
+            let _ = tx.try_send(ServerMessage::Error {
                 message: "訊息發送太頻繁，請稍後再試".into(),
             });
             continue;
@@ -82,7 +91,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
         let client_msg: ClientMessage = match serde_json::from_str(&text) {
             Ok(m) => m,
             Err(e) => {
-                let _ = tx.send(ServerMessage::Error {
+                let _ = tx.try_send(ServerMessage::Error {
                     message: format!("無法解析訊息: {e}"),
                 });
                 continue;
@@ -91,7 +100,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
 
         // 驗證輸入
         if let Err(e) = client_msg.validate() {
-            let _ = tx.send(ServerMessage::Error {
+            let _ = tx.try_send(ServerMessage::Error {
                 message: e.to_string(),
             });
             continue;
@@ -103,7 +112,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                 war3_version,
             } => {
                 if registered {
-                    let _ = tx.send(ServerMessage::Error {
+                    let _ = tx.try_send(ServerMessage::Error {
                         message: "已經註冊過了".into(),
                     });
                     continue;
@@ -129,15 +138,15 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                     .insert(player_id.clone(), player);
                 registered = true;
 
-                let _ = tx.send(ServerMessage::Welcome {
+                let _ = tx.try_send(ServerMessage::Welcome {
                     player_id: player_id.clone(),
                 });
 
                 // 發送當前狀態
-                let _ = tx.send(ServerMessage::PlayerUpdate {
+                let _ = tx.try_send(ServerMessage::PlayerUpdate {
                     players: state.player_snapshot().await,
                 });
-                let _ = tx.send(ServerMessage::RoomUpdate {
+                let _ = tx.try_send(ServerMessage::RoomUpdate {
                     rooms: state.room_snapshot().await,
                 });
 
@@ -220,7 +229,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                 let room = match rooms.get(&room_id) {
                     Some(r) => r,
                     None => {
-                        let _ = tx.send(ServerMessage::JoinResult {
+                        let _ = tx.try_send(ServerMessage::JoinResult {
                             success: false,
                             host_ip: None,
                         });
@@ -232,7 +241,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                 let host_player_id = room.host_player_id.clone();
                 drop(rooms);
 
-                let _ = tx.send(ServerMessage::JoinResult {
+                let _ = tx.try_send(ServerMessage::JoinResult {
                     success: true,
                     host_ip: Some(host_ip),
                 });
@@ -245,7 +254,7 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
                 let joiner_ip = addr.ip().to_string();
 
                 if let Some(host) = players.get(&host_player_id) {
-                    let _ = host.tx.send(ServerMessage::PlayerJoined {
+                    let _ = host.tx.try_send(ServerMessage::PlayerJoined {
                         nickname: joiner_nickname,
                         player_ip: joiner_ip,
                     });

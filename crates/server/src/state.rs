@@ -16,7 +16,7 @@ pub struct ConnectedPlayer {
     pub war3_version: War3Version,
     pub addr: SocketAddr,
     pub last_heartbeat: Instant,
-    pub tx: mpsc::UnboundedSender<ServerMessage>,
+    pub tx: mpsc::Sender<ServerMessage>,
     pub hosting_room: Option<String>,
     /// 斷線時間（None = 仍在線）
     pub disconnected_at: Option<Instant>,
@@ -110,7 +110,7 @@ impl AppState {
         let players = self.players.read().await;
         for player in players.values() {
             if player.disconnected_at.is_none() {
-                let _ = player.tx.send(msg.clone());
+                let _ = player.tx.try_send(msg.clone());
             }
         }
     }
