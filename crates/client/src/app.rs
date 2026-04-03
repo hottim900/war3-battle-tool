@@ -7,8 +7,9 @@ use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo, ServerMessage
 use crate::config::AppConfig;
 use crate::net::discovery::NetEvent;
 use crate::net::packet::PacketSender;
-use crate::ui::lobby::LobbyPanel;
+use crate::ui::lobby::{LobbyAction, LobbyPanel};
 use crate::ui::log_panel::LogPanel;
+use crate::ui::npcap_check;
 use crate::ui::setup_wizard::SetupWizard;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,8 +64,10 @@ pub struct War3App {
     /// In-flight action feedback (join / create room).
     pending_action: Option<PendingAction>,
     /// Manual IP text field shown in offline-fallback mode.
-    #[allow(dead_code)]
     manual_ip: String,
+
+    /// Whether Npcap is detected on the system.
+    npcap_available: bool,
 }
 
 impl War3App {
@@ -78,6 +81,8 @@ impl War3App {
         setup_cjk_fonts(&cc.egui_ctx);
 
         let needs_wizard = !config.is_configured();
+
+        let npcap_available = npcap_check::is_npcap_available();
 
         let mut app = Self {
             config,
@@ -100,6 +105,7 @@ impl War3App {
             log_panel: LogPanel::new(),
             pending_action: None,
             manual_ip: String::new(),
+            npcap_available,
         };
 
         app.log_panel.info("War3 Battle Tool 啟動");
@@ -256,7 +262,6 @@ impl War3App {
 
     /// Returns true if the connection state requires a full-screen overlay
     /// (i.e. the lobby should NOT be shown).
-    #[allow(dead_code)]
     fn show_connection_overlay(&mut self, ui: &mut egui::Ui) -> bool {
         match &self.connection_state {
             ConnectionState::Connected => false,
@@ -328,7 +333,6 @@ impl War3App {
 
     /// Shows pending action feedback (join / create room) as a banner at the
     /// top of the lobby. Returns true if the banner was shown.
-    #[allow(dead_code)]
     fn show_pending_action_banner(&mut self, ui: &mut egui::Ui) -> bool {
         let action = match &self.pending_action {
             Some(a) => a.clone(),
@@ -434,6 +438,18 @@ impl eframe::App for War3App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_network_events();
 
+        // Npcap 檢查：若缺少 npcap 則顯示阻擋畫面
+        if !self.npcap_available {
+            match npcap_check::show_npcap_missing_panel(ctx) {
+                npcap_check::NpcapPanelAction::Recheck => {
+                    self.npcap_available = npcap_check::is_npcap_available();
+                }
+                npcap_check::NpcapPanelAction::None => {}
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+
         // 首次設定精靈
         if let Some(wizard) = &mut self.wizard {
             wizard.show(ctx);
@@ -465,47 +481,56 @@ impl eframe::App for War3App {
         });
 
         let is_hosting = self.is_hosting();
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.show_connection_overlay(ui) {
-                return;
-            }
+        egui::CentralPanel::default().show(ctx, |ui| match self.current_tab {
+            Tab::Lobby => {
+                // Connection-state overlay (connecting / reconnecting / offline)
+                if self.show_connection_overlay(ui) {
+                    return;
+                }
 
-            match self.current_tab {
-                Tab::Lobby => {
-                    self.show_pending_action_banner(ui);
+                // Pending action banner (joining / creating)
+                self.show_pending_action_banner(ui);
 
-                    let my_nickname = if self.config.is_configured() {
-                        Some(self.config.nickname.as_str())
-                    } else {
-                        None
-                    };
-                    let action = self.lobby.show(
-                        ui,
-                        &self.rooms,
-                        &self.players,
-                        my_nickname,
-                        is_hosting,
-                        &self.cmd_tx,
-                    );
-                    use crate::ui::lobby::LobbyAction;
-                    match action {
-                        LobbyAction::JoinRoom { room_name } => {
-                            self.pending_action =
-                                Some(PendingAction::Joining { room_name });
+                let my_nickname = if self.config.is_configured() {
+                    Some(self.config.nickname.as_str())
+                } else {
+                    None
+                };
+                let action = self.lobby.show(
+                    ui,
+                    &self.rooms,
+                    &self.players,
+                    my_nickname,
+                    is_hosting,
+                    &self.cmd_tx,
+                );
+                match action {
+                    LobbyAction::None => {}
+                    LobbyAction::JoinRoom { room_name } => {
+                        self.pending_action = Some(PendingAction::Joining { room_name });
+                    }
+                    LobbyAction::CreateRoom { room_name } => {
+                        // Attempt UPnP port forwarding before creating room
+                        if let Err(e) = crate::net::packet::try_upnp_port_forward(
+                            war3_protocol::war3::WAR3_PORT,
+                        ) {
+                            tracing::warn!("UPnP 失敗，請確保 port 6112 已開放: {e}");
+                            self.log_panel.warn(
+                                "UPnP 失敗，請確保 port 6112 已開放",
+                            );
+                        } else {
+                            self.log_panel.info("UPnP port 映射成功");
                         }
-                        LobbyAction::CreateRoom { room_name } => {
-                            self.pending_action =
-                                Some(PendingAction::CreatingRoom { room_name });
-                        }
-                        LobbyAction::None => {}
+                        self.pending_action =
+                            Some(PendingAction::CreatingRoom { room_name });
                     }
                 }
-                Tab::Settings => {
-                    crate::ui::settings::show(ui, &mut self.config, &mut self.config_changed);
-                }
-                Tab::Log => {
-                    self.log_panel.show(ui);
-                }
+            }
+            Tab::Settings => {
+                crate::ui::settings::show(ui, &mut self.config, &mut self.config_changed);
+            }
+            Tab::Log => {
+                self.log_panel.show(ui);
             }
         });
 

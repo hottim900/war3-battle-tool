@@ -152,6 +152,50 @@ pub fn invite_player(
     Ok(())
 }
 
+/// Attempt to set up UPnP port forwarding for the given UDP port.
+///
+/// Searches for an IGD gateway (timeout 3s) and requests a UDP port mapping
+/// from the external port to the local IP. Returns `Ok(())` on success or an
+/// error if UPnP is unavailable or the mapping request fails.
+pub fn try_upnp_port_forward(port: u16) -> Result<()> {
+    use igd_next::SearchOptions;
+    use std::net::SocketAddrV4;
+
+    let search_opts = SearchOptions {
+        timeout: Some(Duration::from_secs(3)),
+        ..Default::default()
+    };
+
+    let gateway =
+        igd_next::search_gateway(search_opts).context("找不到 UPnP 閘道器")?;
+
+    // Discover local IP by connecting a UDP socket to the gateway
+    let gw_addr = gateway.addr;
+    let local_ip = {
+        let sock = UdpSocket::bind("0.0.0.0:0").context("無法綁定 UDP socket")?;
+        sock.connect(gw_addr)?;
+        match sock.local_addr()?.ip() {
+            IpAddr::V4(ip) => ip,
+            _ => bail!("無法取得本地 IPv4 位址"),
+        }
+    };
+
+    let local_addr = std::net::SocketAddr::V4(SocketAddrV4::new(local_ip, port));
+
+    gateway
+        .add_port(
+            igd_next::PortMappingProtocol::UDP,
+            port,
+            local_addr,
+            3600,
+            "War3 Battle Tool",
+        )
+        .map_err(|e| anyhow::anyhow!("UPnP port mapping 失敗: {e}"))?;
+
+    tracing::info!("UPnP: 成功映射 UDP port {port} -> {local_addr}");
+    Ok(())
+}
+
 /// 測試用的 dummy sender（不真的送封包）
 #[cfg(test)]
 pub struct DummySender;
