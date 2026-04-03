@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,10 +13,11 @@ pub struct ConnectedPlayer {
     pub player_id: String,
     pub nickname: String,
     pub war3_version: War3Version,
-    pub addr: SocketAddr,
+    pub client_ip: IpAddr,
     pub last_heartbeat: Instant,
     pub tx: mpsc::Sender<ServerMessage>,
     pub hosting_room: Option<String>,
+    pub joined_room: Option<String>,
     pub disconnected_at: Option<Instant>,
 }
 
@@ -24,7 +25,7 @@ pub struct Room {
     pub room_id: String,
     pub host_player_id: String,
     pub host_nickname: String,
-    pub host_addr: SocketAddr,
+    pub host_ip: IpAddr,
     pub room_name: String,
     pub map_name: String,
     pub max_players: u8,
@@ -67,7 +68,7 @@ impl AppState {
         }
     }
 
-    /// 廣播玩家和房間列表給所有在線玩家（單次 lock）
+    /// 廣播玩家和房間列表給所有在線玩家
     pub async fn broadcast_state(&self) {
         let players = self.players.read().await;
         let rooms = self.rooms.read().await;
@@ -120,20 +121,27 @@ impl AppState {
         }
     }
 
-    /// 移除玩家及其房間（不觸發 broadcast）
+    /// 移除玩家，清理其房間，並遞減已加入房間的人數
     pub async fn remove_player(&self, player_id: &str) {
-        let hosting_room = {
+        let (hosting_room, joined_room) = {
             let mut players = self.players.write().await;
-            let player = players.remove(player_id);
-            player.and_then(|p| p.hosting_room)
+            match players.remove(player_id) {
+                Some(p) => (p.hosting_room, p.joined_room),
+                None => return,
+            }
         };
 
+        let mut rooms = self.rooms.write().await;
         if let Some(room_id) = hosting_room {
-            self.rooms.write().await.remove(&room_id);
+            rooms.remove(&room_id);
+        }
+        if let Some(room_id) = joined_room
+            && let Some(room) = rooms.get_mut(&room_id)
+        {
+            room.current_players = room.current_players.saturating_sub(1);
         }
     }
 
-    /// 回傳超時或 grace period 到期的玩家 ID 列表
     pub async fn find_expired(
         &self,
         heartbeat_timeout: std::time::Duration,

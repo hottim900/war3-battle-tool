@@ -1,12 +1,13 @@
 mod state;
 mod ws;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use tokio::time::interval;
@@ -58,16 +59,29 @@ async fn main() {
     .unwrap();
 }
 
+/// 從 X-Real-IP header 取得真實 IP，僅信任來自 loopback 的連線（nginx）
+fn real_ip(headers: &HeaderMap, fallback: SocketAddr) -> IpAddr {
+    if fallback.ip().is_loopback() {
+        headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<IpAddr>().ok())
+            .unwrap_or_else(|| fallback.ip())
+    } else {
+        fallback.ip()
+    }
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let ip = addr.ip();
+    let client_ip = real_ip(&headers, addr);
 
-    // 連線數限制
-    if !state.try_acquire_connection(ip).await {
-        warn!(%addr, "連線數超過上限，拒絕連線");
+    if !state.try_acquire_connection(client_ip).await {
+        warn!(%client_ip, "連線數超過上限，拒絕連線");
         return (
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             "Too many connections from this IP",
@@ -75,10 +89,10 @@ async fn ws_handler(
             .into_response();
     }
 
-    info!(%addr, "WebSocket 連線");
+    info!(%client_ip, "WebSocket 連線");
     ws.on_upgrade(move |socket| async move {
-        ws::handle_socket(socket, addr, state.clone()).await;
-        state.release_connection(ip).await;
+        ws::handle_socket(socket, client_ip, state.clone()).await;
+        state.release_connection(client_ip).await;
     })
     .into_response()
 }
