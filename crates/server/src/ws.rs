@@ -180,9 +180,7 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                                 });
                                 None
                             }
-                            Some(p) => {
-                                Some((p.nickname.clone(), p.client_ip, p.war3_version))
-                            }
+                            Some(p) => Some((p.nickname.clone(), p.client_ip, p.war3_version)),
                             None => None,
                         }
                     };
@@ -329,11 +327,8 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                             // 離開舊房間：decrement count
                             if let Some(old_id) = old_room {
                                 drop(players);
-                                if let Some(room) =
-                                    state.rooms.write().await.get_mut(&old_id)
-                                {
-                                    room.current_players =
-                                        room.current_players.saturating_sub(1);
+                                if let Some(room) = state.rooms.write().await.get_mut(&old_id) {
+                                    room.current_players = room.current_players.saturating_sub(1);
                                 }
                             } else {
                                 drop(players);
