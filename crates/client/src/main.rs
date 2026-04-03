@@ -11,6 +11,11 @@ use net::discovery::{self, NetEvent};
 use war3_protocol::messages::ClientMessage;
 
 fn main() {
+    // rustls 0.23+ 需要手動安裝 crypto provider
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("無法安裝 rustls crypto provider");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
