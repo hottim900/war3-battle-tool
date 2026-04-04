@@ -12,7 +12,7 @@ fn main() -> Result<()> {
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
     match cmd {
-        "capture" => capture()?,
+        "capture" => capture(args.get(2).map(|s| s.as_str()))?,
         "inject" => inject(args.get(2).map(|s| s.as_str()))?,
         _ => print_usage(),
     }
@@ -23,24 +23,30 @@ fn print_usage() {
     eprintln!("Raw UDP 實驗工具");
     eprintln!();
     eprintln!("用法:");
-    eprintln!("  spike-raw-udp capture           Phase 1: 捕捉 War3 GAMEINFO（需要先在 War3 開房）");
-    eprintln!("  spike-raw-udp inject             Phase 2: 注入 GAMEINFO 到 War3（需要在 LAN Games 畫面）");
-    eprintln!("  spike-raw-udp inject 1.2.3.4     Phase 2: 注入時指定來源 IP（測試 IP 替換）");
+    eprintln!("  spike-raw-udp capture              捕捉本機 War3 GAMEINFO（127.0.0.1）");
+    eprintln!("  spike-raw-udp capture 192.168.1.5   捕捉遠端 War3 GAMEINFO");
+    eprintln!("  spike-raw-udp inject                注入 GAMEINFO 到本機 War3");
+    eprintln!("  spike-raw-udp inject 1.2.3.4        注入時嘗試替換內嵌 IP");
 }
 
-/// Phase 1: 送 SEARCHGAME 到 127.0.0.1:6112，捕捉 GAMEINFO 回覆
-fn capture() -> Result<()> {
-    println!("=== Phase 1: 捕捉 GAMEINFO ===");
-    println!("前提：War3 已開啟並建立一個房間（Create Game）");
+/// 送 SEARCHGAME 到目標 IP:6112，捕捉 GAMEINFO 回覆
+fn capture(target_ip: Option<&str>) -> Result<()> {
+    let ip: Ipv4Addr = match target_ip {
+        Some(s) => s.parse().context("無效的 IP 位址")?,
+        None => Ipv4Addr::LOCALHOST,
+    };
+
+    println!("=== 捕捉 GAMEINFO ===");
+    println!("目標：{ip}:{WAR3_PORT}");
     println!();
 
     let sock = UdpSocket::bind("0.0.0.0:0").context("無法綁定 UDP socket")?;
     sock.set_read_timeout(Some(Duration::from_secs(2)))?;
 
     let broadcast = War3Version::V127.broadcast_packet();
-    let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), WAR3_PORT);
+    let target = SocketAddr::new(IpAddr::V4(ip), WAR3_PORT);
 
-    println!("送出 SEARCHGAME 到 127.0.0.1:{WAR3_PORT}...");
+    println!("送出 SEARCHGAME...");
     for i in 0..3 {
         sock.send_to(broadcast, target)?;
         if i < 2 {
@@ -61,10 +67,10 @@ fn capture() -> Result<()> {
                 .context("寫入 gameinfo.bin 失敗")?;
             println!("已儲存到 {GAMEINFO_FILE} ({len} bytes)");
             println!();
-            println!("下一步：關閉房間 → 回到 LAN Games 畫面 → 執行 `spike-raw-udp inject`");
+            println!("下一步：在 hosta 的 War3 LAN Games 畫面執行 `spike-raw-udp inject`");
         }
         Err(e) => {
-            bail!("沒有收到回覆: {e}\n\n確認 War3 有開房且在 LAN Games 畫面");
+            bail!("沒有收到回覆: {e}\n\n確認目標 {ip} 有開房且防火牆沒擋 UDP {WAR3_PORT}");
         }
     }
 
