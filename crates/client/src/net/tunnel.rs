@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,7 +37,7 @@ pub enum TunnelEvent {
 pub async fn run_joiner_tunnel(
     server_url: String,
     tunnel_token: String,
-    peer_addr: Option<SocketAddr>,
+    peer_addr: Option<IpAddr>,
     event_tx: tokio::sync::mpsc::UnboundedSender<TunnelEvent>,
 ) {
     let token_short = tunnel_token.get(..8).unwrap_or(&tunnel_token).to_string();
@@ -124,35 +124,37 @@ pub async fn run_joiner_tunnel(
 pub async fn run_host_tunnel(
     server_url: String,
     tunnel_token: String,
-    _peer_addr: Option<SocketAddr>,
+    peer_addr: Option<IpAddr>,
     event_tx: tokio::sync::mpsc::UnboundedSender<TunnelEvent>,
 ) {
     let token_short = tunnel_token.get(..8).unwrap_or(&tunnel_token).to_string();
 
-    // 1. 嘗試 QUIC 直連（host 監聽）
-    info!(%token_short, "嘗試 QUIC host 監聽");
-    match quic::accept_direct(&tunnel_token).await {
-        Ok((quic_send, quic_recv)) => {
-            info!(%token_short, "QUIC 直連成功，連接 War3 TCP");
-            let tcp_stream = match connect_war3_tcp(&token_short).await {
-                Some(s) => s,
-                None => {
-                    let _ = event_tx.send(TunnelEvent::Finished {
-                        error: Some("無法連接 War3".to_string()),
-                    });
-                    return;
-                }
-            };
-            let result = bridge_tcp_quic(tcp_stream, quic_send, quic_recv, &token_short).await;
-            let _ = event_tx.send(TunnelEvent::Finished {
-                error: result.err(),
-            });
-            return;
+    // 1. 嘗試 QUIC 直連（有 peer_addr 才嘗試，避免無意義 5s 等待）
+    if peer_addr.is_some() {
+        info!(%token_short, "嘗試 QUIC host 監聽");
+        match quic::accept_direct(&tunnel_token).await {
+            Ok((quic_send, quic_recv)) => {
+                info!(%token_short, "QUIC 直連成功，連接 War3 TCP");
+                let tcp_stream = match connect_war3_tcp(&token_short).await {
+                    Some(s) => s,
+                    None => {
+                        let _ = event_tx.send(TunnelEvent::Finished {
+                            error: Some("無法連接 War3".to_string()),
+                        });
+                        return;
+                    }
+                };
+                let result = bridge_tcp_quic(tcp_stream, quic_send, quic_recv, &token_short).await;
+                let _ = event_tx.send(TunnelEvent::Finished {
+                    error: result.err(),
+                });
+                return;
+            }
+            Err(e) => {
+                info!(%token_short, %e, "QUIC host 監聽失敗，fallback WS relay");
+            }
         }
-        Err(e) => {
-            info!(%token_short, %e, "QUIC host 監聽失敗，fallback WS relay");
-        }
-    }
+    } // peer_addr.is_some()
 
     // 2. Fallback: WS relay
     let base_url = server_url.strip_suffix("/ws").unwrap_or(&server_url);

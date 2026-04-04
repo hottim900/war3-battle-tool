@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -80,7 +79,7 @@ pub struct War3App {
     latency_ms: Arc<AtomicU64>,
 
     /// P2P 直連：對方 IP（從 StunInfo 接收）
-    peer_addr: Option<SocketAddr>,
+    peer_addr: Option<std::net::IpAddr>,
 }
 
 impl War3App {
@@ -333,7 +332,7 @@ impl War3App {
             }
             ServerMessage::StunInfo { peer_addr } => {
                 if let Ok(ip) = peer_addr.parse::<std::net::IpAddr>() {
-                    self.peer_addr = Some(SocketAddr::new(ip, 0));
+                    self.peer_addr = Some(ip);
                     self.log_panel.info("收到 P2P 直連資訊");
                 }
             }

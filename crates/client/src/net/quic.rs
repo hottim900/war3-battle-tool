@@ -56,7 +56,7 @@ pub async fn accept_direct(tunnel_token: &str) -> Result<(quinn::SendStream, qui
 ///
 /// 返回 (send, recv) stream，或 Err（caller fallback relay）
 pub async fn connect_direct(
-    peer_addr: SocketAddr,
+    peer_ip: std::net::IpAddr,
     tunnel_token: &str,
 ) -> Result<(quinn::SendStream, quinn::RecvStream)> {
     let alpn = make_alpn(tunnel_token);
@@ -72,7 +72,7 @@ pub async fn connect_direct(
     let mut endpoint = quinn::Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic_crypto)));
 
-    let target = SocketAddr::new(peer_addr.ip(), QUIC_PORT);
+    let target = SocketAddr::new(peer_ip, QUIC_PORT);
     info!(%target, "QUIC joiner 連線中");
 
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(target, "war3-tunnel")?)
