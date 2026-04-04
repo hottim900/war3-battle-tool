@@ -2,47 +2,64 @@
 
 ## 前提
 - Rust 已安裝 (rustup)
-- npcap 已安裝 (npcap.com，勾選 WinPcap API-compatible mode)
 - Visual Studio Build Tools 已安裝 (C++ workload)
+- Warcraft III 1.27 或 1.29c 已安裝
 
-## 步驟
+## 建置
 
 ```powershell
 cd C:\Users\<username>\war3-battle-tool
-git pull origin feat/client-crate
+git pull origin master
 
-# 1. Build (build.rs 會自動下載 16MB CJK 字型)
+# build.rs 會自動下載 16MB CJK 字型
 cargo build --release --package war3-client
-cargo build --release --package war3-server
-
-# 2. 啟動 server
-start target\release\war3-server.exe
-
-# 3. 啟動 client
-target\release\war3-client.exe
 ```
 
-## 驗證清單
+## 測試流程
 
-- [ ] client 啟動，顯示首次設定精靈
-- [ ] 輸入暱稱，選版本，進入大廳
-- [ ] 狀態列顯示 "● 已連線"
-- [ ] 建立房間，大廳顯示房間
-- [ ] 開第二個 client，看到房間列表
-- [ ] 點加入，log 顯示 "封包注入成功"
-- [ ] 開 War3 → 區域網路 → 看到房間
+### 基本連線測試
 
-## 如果 War3 看不到房間
+1. 執行 `target\release\war3-client.exe`
+2. 驗證：
+   - [ ] 啟動顯示首次設定精靈
+   - [ ] 輸入暱稱，選版本，進入大廳
+   - [ ] 狀態列顯示 "● 已連線"
 
-封包格式可能需要調整。用 Wireshark 抓 loopback 上的 UDP port 6112 流量，對比正常 LAN 的 W3GS_GAMEINFO 封包。
+### 建房 + 加入測試（LAN，同一台機器）
 
-## Claude Code prompt (Windows session)
+**Host 端：**
+1. 開 War3，建立區域網路遊戲
+2. 在 War3 Battle Tool 點「建立房間」
+3. 驗證：大廳顯示你的房間
 
-```
-在 C:\Users\<username>\war3-battle-tool 專案。所有程式碼已寫好，需要 Windows 整合測試。
-1. cargo build --release --package war3-client 確認編譯
-2. 如果 NpcapSender 編譯失敗，debug pcap crate linking
-3. 啟動 server + client，驗證 GUI 正常
-4. 開 War3 1.27，測試加入房間是否能在 LAN 畫面看到房間
-5. 如果看不到，用 Wireshark 分析封包格式差異並修正
-```
+**Joiner 端（第二個 client）：**
+1. 開另一個 War3 Battle Tool
+2. 看到房間，點「加入」
+3. 驗證：
+   - [ ] Log 顯示 "加入成功！正在建立 tunnel 連線..."
+   - [ ] Log 顯示 "Tunnel proxy 就緒"
+   - [ ] Log 顯示 "GAMEINFO 注入開始"
+4. 切到 War3 區域網路畫面
+5. 驗證：
+   - [ ] War3 顯示房間
+   - [ ] 點 Join，遊戲開始
+
+### Tunnel Relay 測試（WAN，兩個不同網路）
+
+同上流程，但兩台 Windows 在不同網路環境。這是 go/no-go gate。
+
+## 疑難排解
+
+### War3 看不到房間
+- 確認 War3 在區域網路畫面
+- 確認 Log 有 "GAMEINFO 注入開始"
+- 確認 127.0.0.2 loopback 可用：`ping 127.0.0.2`
+
+### Tunnel 連線失敗
+- 確認 server 可達：瀏覽器開 `https://war3.kalthor.cc/health`
+- 確認 nginx 有 `/tunnel` 路由設定
+- 檢查 Log 的錯誤訊息
+
+### Port 6112 被佔用
+- War3 正在 host 模式會佔用 6112
+- Joiner 端不要同時 host War3 遊戲

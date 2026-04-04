@@ -17,9 +17,15 @@
 - 調查台灣/海外老 War3 社群是否有其他類似工具
 - 分析 W3Champions 對舊版的策略（是否計畫支援）
 
-### NpcapSender 程式碼品質
-- payload overflow 邊界檢查 (npcap_sender.rs:build_loopback_packet)
-- IP checksum 長度驗證
-- loopback adapter 名稱匹配改為實際嘗試開啟
-- loopback init 失敗改為 bail（非 warn）
-- **When:** 僅在 raw UDP 實驗失敗、需要保留 npcap 時修正
+### ~~NpcapSender 程式碼品質~~
+- **Completed:** v0.2.0 (2026-04-04) — npcap 已移除，改用 raw UDP + tunnel relay
+
+### 多區域 Relay Server
+- 目前只有東京一個 VPS，台灣雙方延遲 ~60ms
+- 評估新加坡或香港 VPS 降低延遲
+- **When:** 使用者數量成長後
+
+### 127.0.0.2 環境相容性
+- 在多種 Windows 10/11 環境測試 127.0.0.2 loopback 是否可用
+- 防火牆、企業環境、VPN 可能影響
+- **When:** v0.2.0 發布後收集回饋
