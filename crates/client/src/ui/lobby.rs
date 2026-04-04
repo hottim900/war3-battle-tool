@@ -6,8 +6,14 @@ use war3_protocol::messages::ClientMessage;
 /// Action returned from `LobbyPanel::show` so the app can track pending state.
 pub enum LobbyAction {
     None,
-    JoinRoom { room_name: String },
-    CreateRoom { room_name: String },
+    JoinRoom {
+        room_name: String,
+    },
+    CreateRoom {
+        room_name: String,
+        map_name: String,
+        max_players: u8,
+    },
 }
 
 /// 大廳畫面：上方房間列表，下方線上玩家
@@ -105,11 +111,9 @@ impl LobbyPanel {
 
         // 建房對話框
         if self.show_create_dialog
-            && let Some(created_name) = self.show_create_room_dialog(ui, cmd_tx)
+            && let Some(create_action) = self.show_create_room_dialog(ui)
         {
-            action = LobbyAction::CreateRoom {
-                room_name: created_name,
-            };
+            action = create_action;
         }
 
         ui.add_space(20.0);
@@ -144,14 +148,9 @@ impl LobbyPanel {
         action
     }
 
-    /// Shows the create-room dialog. Returns `Some(room_name)` when the user
-    /// confirms creation, `None` otherwise.
-    fn show_create_room_dialog(
-        &mut self,
-        ui: &mut egui::Ui,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
-    ) -> Option<String> {
-        let mut created_name: Option<String> = None;
+    /// Shows the create-room dialog. Returns the action when user confirms.
+    fn show_create_room_dialog(&mut self, ui: &mut egui::Ui) -> Option<LobbyAction> {
+        let mut result: Option<LobbyAction> = None;
 
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.heading("建立房間");
@@ -181,8 +180,7 @@ impl LobbyPanel {
                     .add_enabled(can_create, egui::Button::new("建立"))
                     .clicked()
                 {
-                    created_name = Some(self.create_room_name.clone());
-                    let _ = cmd_tx.send(ClientMessage::CreateRoom {
+                    result = Some(LobbyAction::CreateRoom {
                         room_name: self.create_room_name.clone(),
                         map_name: self.create_map_name.clone(),
                         max_players: self.create_max_players,
@@ -197,6 +195,6 @@ impl LobbyPanel {
             });
         });
 
-        created_name
+        result
     }
 }

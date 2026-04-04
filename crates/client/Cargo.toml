@@ -18,7 +18,3 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 chrono = "0.4"
 open = "5"
-igd-next = "0.15"
-
-[target.'cfg(windows)'.dependencies]
-pcap = "2"

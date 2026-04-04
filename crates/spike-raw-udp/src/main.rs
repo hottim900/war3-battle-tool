@@ -76,7 +76,10 @@ fn inject() -> Result<()> {
     let gameinfo = fs::read(GAMEINFO_FILE)
         .with_context(|| format!("讀取 {GAMEINFO_FILE} 失敗，請先執行 capture"))?;
 
-    println!("[inject] 從 {PROXY_IP} 送出 GAMEINFO ({} bytes) 到 127.0.0.1:{WAR3_PORT}", gameinfo.len());
+    println!(
+        "[inject] 從 {PROXY_IP} 送出 GAMEINFO ({} bytes) 到 127.0.0.1:{WAR3_PORT}",
+        gameinfo.len()
+    );
 
     // bind 到 127.0.0.2 讓 War3 看到 source IP = 127.0.0.2
     let sock = UdpSocket::bind(SocketAddr::new(IpAddr::V4(PROXY_IP), 0))
@@ -112,8 +115,8 @@ fn proxy(host_ip: Option<&str>) -> Result<()> {
     });
 
     // TCP proxy (前景)
-    let listener = TcpListener::bind(proxy_addr)
-        .with_context(|| format!("無法 bind TCP {proxy_addr}"))?;
+    let listener =
+        TcpListener::bind(proxy_addr).with_context(|| format!("無法 bind TCP {proxy_addr}"))?;
 
     println!("[proxy] TCP+UDP proxy 啟動: {proxy_addr} → {host_addr}");
     println!("[proxy] 等待 War3 連線...");
@@ -184,8 +187,8 @@ fn join(host_ip: Option<&str>) -> Result<()> {
 /// UDP proxy: 轉發 127.0.0.2:6112 ↔ host:6112
 fn run_udp_proxy(host: Ipv4Addr) -> Result<()> {
     let proxy_addr = SocketAddr::new(IpAddr::V4(PROXY_IP), WAR3_PORT);
-    let sock = UdpSocket::bind(proxy_addr)
-        .with_context(|| format!("無法 bind UDP {proxy_addr}"))?;
+    let sock =
+        UdpSocket::bind(proxy_addr).with_context(|| format!("無法 bind UDP {proxy_addr}"))?;
     sock.set_read_timeout(Some(Duration::from_secs(30)))?;
 
     let host_addr = SocketAddr::new(IpAddr::V4(host), WAR3_PORT);
@@ -206,7 +209,10 @@ fn run_udp_proxy(host: Ipv4Addr) -> Result<()> {
                     println!("[udp-proxy] ← 轉發到 {src}");
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
                 continue;
             }
             Err(e) => {
@@ -232,7 +238,9 @@ fn relay_tcp(mut client: TcpStream, host_addr: SocketAddr) -> Result<()> {
         let mut buf = [0u8; 8192];
         loop {
             let n = client.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             server.write_all(&buf[..n])?;
         }
         let _ = server.shutdown(std::net::Shutdown::Write);
@@ -244,7 +252,9 @@ fn relay_tcp(mut client: TcpStream, host_addr: SocketAddr) -> Result<()> {
         let mut buf = [0u8; 8192];
         loop {
             let n = server_clone.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             client_clone.write_all(&buf[..n])?;
         }
         let _ = client_clone.shutdown(std::net::Shutdown::Write);
@@ -262,11 +272,15 @@ fn hex_dump(data: &[u8]) {
         print!("{:04x}  ", i * 16);
         for (j, byte) in chunk.iter().enumerate() {
             print!("{:02x} ", byte);
-            if j == 7 { print!(" "); }
+            if j == 7 {
+                print!(" ");
+            }
         }
         for j in chunk.len()..16 {
             print!("   ");
-            if j == 7 { print!(" "); }
+            if j == 7 {
+                print!(" ");
+            }
         }
         print!(" |");
         for byte in chunk {

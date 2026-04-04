@@ -1,6 +1,8 @@
 mod state;
+mod tunnel;
 mod ws;
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +17,12 @@ use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 use state::AppState;
+use tunnel::TunnelState;
+
+struct SharedState {
+    app: Arc<AppState>,
+    tunnel: Arc<TunnelState>,
+}
 
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 const GRACE_PERIOD: Duration = Duration::from_secs(60);
@@ -29,15 +37,22 @@ async fn main() {
         )
         .init();
 
-    let state = AppState::new();
+    let app_state = AppState::new();
+    let tunnel_state = TunnelState::new();
 
-    spawn_cleanup_task(state.clone());
+    spawn_cleanup_task(app_state.clone(), tunnel_state.clone());
+
+    let shared = Arc::new(SharedState {
+        app: app_state,
+        tunnel: tunnel_state,
+    });
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/tunnel", get(tunnel_handler))
         .route("/health", get(|| async { "ok" }))
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(shared);
 
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -76,9 +91,10 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    State(state): State<Arc<AppState>>,
+    State(shared): State<Arc<SharedState>>,
 ) -> impl IntoResponse {
     let client_ip = real_ip(&headers, addr);
+    let state = shared.app.clone();
 
     if !state.try_acquire_connection(client_ip).await {
         warn!(%client_ip, "連線數超過上限，拒絕連線");
@@ -97,11 +113,65 @@ async fn ws_handler(
     .into_response()
 }
 
-fn spawn_cleanup_task(state: Arc<AppState>) {
+async fn tunnel_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    State(shared): State<Arc<SharedState>>,
+) -> impl IntoResponse {
+    let client_ip = real_ip(&headers, addr);
+    let tunnel_state = shared.tunnel.clone();
+
+    let token = match params.get("token") {
+        Some(t) if !t.is_empty() => t.clone(),
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Missing token parameter",
+            )
+                .into_response();
+        }
+    };
+
+    let role = match params.get("role") {
+        Some(r) if r == "host" || r == "join" => r.clone(),
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Invalid role parameter (host|join)",
+            )
+                .into_response();
+        }
+    };
+
+    if !tunnel_state.try_acquire_tunnel_connection(client_ip).await {
+        warn!(%client_ip, "Tunnel 連線數超過上限");
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "Too many tunnel connections from this IP",
+        )
+            .into_response();
+    }
+
+    let token_short = token.get(..8).unwrap_or(&token).to_string();
+    info!(%client_ip, %token_short, %role, "Tunnel WebSocket 連線");
+
+    ws.on_upgrade(move |socket| async move {
+        tunnel::handle_tunnel(socket, client_ip, token, role, tunnel_state.clone()).await;
+        tunnel_state.release_tunnel_connection(client_ip).await;
+    })
+    .into_response()
+}
+
+fn spawn_cleanup_task(state: Arc<AppState>, tunnel_state: Arc<TunnelState>) {
     tokio::spawn(async move {
         let mut tick = interval(CLEANUP_INTERVAL);
         loop {
             tick.tick().await;
+
+            // 清理過期 tunnel sessions
+            tunnel_state.cleanup_expired().await;
 
             let expired = state.find_expired(HEARTBEAT_TIMEOUT, GRACE_PERIOD).await;
 

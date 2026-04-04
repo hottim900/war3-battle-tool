@@ -8,6 +8,7 @@ fn register_valid() {
     let msg = ClientMessage::Register {
         nickname: "TestPlayer".into(),
         war3_version: War3Version::V127,
+        client_version: None,
     };
     assert!(msg.validate().is_ok());
 }
@@ -17,6 +18,7 @@ fn register_empty_nickname() {
     let msg = ClientMessage::Register {
         nickname: "".into(),
         war3_version: War3Version::V127,
+        client_version: None,
     };
     assert!(msg.validate().is_err());
 }
@@ -26,6 +28,7 @@ fn register_whitespace_nickname() {
     let msg = ClientMessage::Register {
         nickname: "   ".into(),
         war3_version: War3Version::V127,
+        client_version: None,
     };
     assert!(msg.validate().is_err());
 }
@@ -35,6 +38,7 @@ fn register_nickname_too_long() {
     let msg = ClientMessage::Register {
         nickname: "a".repeat(MAX_NICKNAME_LEN + 1),
         war3_version: War3Version::V129c,
+        client_version: None,
     };
     assert!(msg.validate().is_err());
 }
@@ -44,6 +48,7 @@ fn register_nickname_at_limit() {
     let msg = ClientMessage::Register {
         nickname: "a".repeat(MAX_NICKNAME_LEN),
         war3_version: War3Version::V127,
+        client_version: None,
     };
     assert!(msg.validate().is_ok());
 }
@@ -53,6 +58,7 @@ fn register_cjk_nickname() {
     let msg = ClientMessage::Register {
         nickname: "台灣玩家".into(),
         war3_version: War3Version::V127,
+        client_version: None,
     };
     assert!(msg.validate().is_ok());
 }
@@ -65,6 +71,7 @@ fn create_room_valid() {
         room_name: "來玩啊".into(),
         map_name: "LostTemple".into(),
         max_players: 4,
+        gameinfo: vec![0xf7, 0x30],
     };
     assert!(msg.validate().is_ok());
 }
@@ -75,6 +82,7 @@ fn create_room_empty_name() {
         room_name: "".into(),
         map_name: "LT".into(),
         max_players: 4,
+        gameinfo: Vec::new(),
     };
     assert!(msg.validate().is_err());
 }
@@ -85,6 +93,7 @@ fn create_room_name_too_long() {
         room_name: "x".repeat(MAX_ROOM_NAME_LEN + 1),
         map_name: "LT".into(),
         max_players: 4,
+        gameinfo: Vec::new(),
     };
     assert!(msg.validate().is_err());
 }
@@ -95,6 +104,7 @@ fn create_room_map_name_too_long() {
         room_name: "Room".into(),
         map_name: "m".repeat(MAX_MAP_NAME_LEN + 1),
         max_players: 4,
+        gameinfo: Vec::new(),
     };
     assert!(msg.validate().is_err());
 }
@@ -105,6 +115,7 @@ fn create_room_max_players_too_low() {
         room_name: "Room".into(),
         map_name: "LT".into(),
         max_players: 1,
+        gameinfo: Vec::new(),
     };
     assert!(msg.validate().is_err());
 }
@@ -115,6 +126,7 @@ fn create_room_max_players_too_high() {
         room_name: "Room".into(),
         map_name: "LT".into(),
         max_players: 13,
+        gameinfo: Vec::new(),
     };
     assert!(msg.validate().is_err());
 }
@@ -126,9 +138,32 @@ fn create_room_max_players_boundaries() {
             room_name: "Room".into(),
             map_name: "LT".into(),
             max_players: n,
+            gameinfo: Vec::new(),
         };
         assert!(msg.validate().is_ok(), "max_players={n} should be valid");
     }
+}
+
+#[test]
+fn create_room_gameinfo_too_large() {
+    let msg = ClientMessage::CreateRoom {
+        room_name: "Room".into(),
+        map_name: "LT".into(),
+        max_players: 4,
+        gameinfo: vec![0u8; MAX_GAMEINFO_LEN + 1],
+    };
+    assert!(msg.validate().is_err());
+}
+
+#[test]
+fn create_room_gameinfo_at_limit() {
+    let msg = ClientMessage::CreateRoom {
+        room_name: "Room".into(),
+        map_name: "LT".into(),
+        max_players: 4,
+        gameinfo: vec![0u8; MAX_GAMEINFO_LEN],
+    };
+    assert!(msg.validate().is_ok());
 }
 
 // ── validate: passthrough ──
@@ -159,12 +194,14 @@ fn client_message_serde_roundtrip() {
         ClientMessage::Register {
             nickname: "Player".into(),
             war3_version: War3Version::V127,
+            client_version: Some("0.2.0".into()),
         },
         ClientMessage::Heartbeat,
         ClientMessage::CreateRoom {
             room_name: "Room".into(),
             map_name: "Map".into(),
             max_players: 8,
+            gameinfo: vec![0xf7, 0x30],
         },
         ClientMessage::CloseRoom,
         ClientMessage::JoinRoom {
@@ -210,11 +247,16 @@ fn server_message_serde_roundtrip() {
         },
         ServerMessage::JoinResult {
             success: true,
-            host_ip: Some("1.2.3.4".into()),
+            room_id: Some("room-1".into()),
+            tunnel_token: Some("token-abc".into()),
+            gameinfo: Some(vec![0xf7, 0x30]),
         },
         ServerMessage::PlayerJoined {
             nickname: "Joiner".into(),
-            player_ip: "5.6.7.8".into(),
+            tunnel_token: "token-xyz".into(),
+        },
+        ServerMessage::TunnelReady {
+            tunnel_token: "token-ready".into(),
         },
         ServerMessage::Error {
             message: "err".into(),

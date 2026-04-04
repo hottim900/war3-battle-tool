@@ -36,39 +36,53 @@ fn server_message_room_update_serialization() {
 }
 
 #[test]
-fn join_result_with_ip() {
+fn join_result_with_tunnel_token() {
     let msg = ServerMessage::JoinResult {
         success: true,
-        host_ip: Some("192.168.1.100".into()),
+        room_id: Some("room-1".into()),
+        tunnel_token: Some("token-abc".into()),
+        gameinfo: Some(vec![0xf7, 0x30]),
     };
     let json = serde_json::to_string(&msg).unwrap();
-    assert!(json.contains("192.168.1.100"));
+    assert!(json.contains("token-abc"));
+    assert!(json.contains("room-1"));
 }
 
 #[test]
 fn join_result_failure() {
-    let msg = ServerMessage::JoinResult {
-        success: false,
-        host_ip: None,
-    };
+    let msg = ServerMessage::join_failure();
     let json = serde_json::to_string(&msg).unwrap();
     let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
     match parsed {
-        ServerMessage::JoinResult { success, host_ip } => {
+        ServerMessage::JoinResult {
+            success,
+            tunnel_token,
+            ..
+        } => {
             assert!(!success);
-            assert!(host_ip.is_none());
+            assert!(tunnel_token.is_none());
         }
         _ => panic!("wrong variant"),
     }
 }
 
 #[test]
-fn player_joined_contains_ip() {
+fn player_joined_contains_tunnel_token() {
     let msg = ServerMessage::PlayerJoined {
         nickname: "Joiner".into(),
-        player_ip: "10.0.0.5".into(),
+        tunnel_token: "token-xyz".into(),
     };
     let json = serde_json::to_string(&msg).unwrap();
-    assert!(json.contains("10.0.0.5"));
+    assert!(json.contains("token-xyz"));
     assert!(json.contains("Joiner"));
+}
+
+#[test]
+fn tunnel_ready_serialization() {
+    let msg = ServerMessage::TunnelReady {
+        tunnel_token: "token-ready".into(),
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    assert!(json.contains("TunnelReady"));
+    assert!(json.contains("token-ready"));
 }

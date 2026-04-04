@@ -113,6 +113,7 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                 ClientMessage::Register {
                     nickname,
                     war3_version,
+                    client_version: _,
                 } => {
                     if registered {
                         let _ = tx.try_send(ServerMessage::Error {
@@ -166,6 +167,7 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                     room_name,
                     map_name,
                     max_players,
+                    gameinfo,
                 } => {
                     if !registered {
                         continue;
@@ -185,7 +187,7 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                         }
                     };
 
-                    let (nickname, player_ip, war3_version) = match player_data {
+                    let (nickname, _player_ip, war3_version) = match player_data {
                         Some(data) => data,
                         None => continue,
                     };
@@ -202,12 +204,12 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                         room_id: room_id.clone(),
                         host_player_id: player_id.clone(),
                         host_nickname: nickname,
-                        host_ip: player_ip,
                         room_name,
                         map_name,
                         max_players,
                         current_players: 1,
                         war3_version,
+                        gameinfo,
                     };
 
                     info!(%room_id, "房間建立");
@@ -260,14 +262,14 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                         rooms.get(&room_id).map(|r| {
                             (
                                 r.host_player_id.clone(),
-                                r.host_ip.to_string(),
                                 r.war3_version,
                                 r.current_players >= r.max_players,
+                                r.gameinfo.clone(),
                             )
                         })
                     };
 
-                    let (host_player_id, host_ip, room_version, room_full) = match room_data {
+                    let (host_player_id, room_version, room_full, gameinfo) = match room_data {
                         Some(data) => data,
                         None => {
                             let _ = tx.try_send(ServerMessage::join_failure());
@@ -301,18 +303,25 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                         continue;
                     }
 
+                    let tunnel_token = Uuid::new_v4().to_string();
+
                     let _ = tx.try_send(ServerMessage::JoinResult {
                         success: true,
-                        host_ip: Some(host_ip),
+                        room_id: Some(room_id.clone()),
+                        tunnel_token: Some(tunnel_token.clone()),
+                        gameinfo: if gameinfo.is_empty() {
+                            None
+                        } else {
+                            Some(gameinfo)
+                        },
                     });
 
                     let joiner_nickname = joiner.nickname.clone();
-                    let joiner_ip = joiner.client_ip.to_string();
 
                     if let Some(host) = players.get(&host_player_id) {
                         let _ = host.tx.try_send(ServerMessage::PlayerJoined {
                             nickname: joiner_nickname,
-                            player_ip: joiner_ip,
+                            tunnel_token: tunnel_token.clone(),
                         });
                     }
 
