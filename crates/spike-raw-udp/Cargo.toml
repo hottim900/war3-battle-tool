@@ -1,0 +1,8 @@
+[package]
+name = "spike-raw-udp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+war3-protocol = { path = "../protocol" }
+anyhow.workspace = true
