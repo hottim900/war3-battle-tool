@@ -59,10 +59,13 @@ jobs:
       - name: Build client (release)
         run: cargo build --release --package war3-client
 
+      - name: Rename with version
+        run: cp target/release/war3-client.exe "war3-client-${{ github.ref_name }}.exe"
+
       - name: Upload client binary to release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/war3-client.exe
+          files: "war3-client-${{ github.ref_name }}.exe"
 
   build-server:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -78,10 +81,13 @@ jobs:
       - name: Build server (release)
         run: cargo build --release --package war3-server
 
+      - name: Rename with version
+        run: cp target/release/war3-server "war3-server-${{ github.ref_name }}"
+
       - name: Upload server binary to release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/war3-server
+          files: "war3-server-${{ github.ref_name }}"
 
   deploy:
     if: github.ref == 'refs/heads/master'
