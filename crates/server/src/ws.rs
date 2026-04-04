@@ -75,7 +75,6 @@ pub async fn handle_socket(
     let mut registered = false;
     let mut rate_limiter = RateLimiter::new();
     let mut last_join_at: Option<Instant> = None;
-    let mut join_pending = false;
 
     let receive_loop = async {
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -255,13 +254,6 @@ pub async fn handle_socket(
                         continue;
                     }
 
-                    if join_pending {
-                        let _ = tx.try_send(ServerMessage::Error {
-                            message: "正在加入中，請稍候".into(),
-                        });
-                        continue;
-                    }
-
                     if let Some(last) = last_join_at
                         && last.elapsed() < JOIN_COOLDOWN
                     {
@@ -366,7 +358,6 @@ pub async fn handle_socket(
                     }
 
                     last_join_at = Some(Instant::now());
-                    join_pending = true;
                     info!(%room_id, %player_id, "玩家加入房間");
                     state.broadcast_state().await;
                 }

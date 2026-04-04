@@ -14,14 +14,11 @@ const RELAY_CHANNEL_SIZE: usize = 64;
 const RATE_LIMIT_BYTES_PER_SEC: usize = 50 * 1024; // 50 KB/s
 const MAX_TUNNEL_CONNECTIONS_PER_IP: u32 = 12;
 
-/// Tunnel session 等待配對的資料
-struct PendingTunnel {
-    /// host 端的 WS sender
-    host_tx: mpsc::Sender<Message>,
-    /// 通知 host 端 joiner 已配對
-    paired_notify: oneshot::Sender<mpsc::Sender<Message>>,
-    /// Token 綁定的 host IP
-    host_ip: IpAddr,
+/// 等待配對的一端（不分 host/joiner，先到先等）
+struct WaitingPeer {
+    tx: mpsc::Sender<Message>,
+    notify: oneshot::Sender<mpsc::Sender<Message>>,
+    role: String,
     created_at: Instant,
 }
 
@@ -32,8 +29,8 @@ struct TokenBinding {
 }
 
 pub struct TunnelState {
-    /// token → 等待配對的 tunnel（host 先到）
-    pending: RwLock<HashMap<String, PendingTunnel>>,
+    /// token → 先到的一端（等待配對）
+    waiting: RwLock<HashMap<String, WaitingPeer>>,
     /// token → IP binding（JoinRoom 時註冊，/tunnel 連線時驗證）
     token_bindings: RwLock<HashMap<String, TokenBinding>>,
     /// per-IP tunnel 連線數
@@ -43,7 +40,7 @@ pub struct TunnelState {
 impl TunnelState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            pending: RwLock::new(HashMap::new()),
+            waiting: RwLock::new(HashMap::new()),
             token_bindings: RwLock::new(HashMap::new()),
             connections_per_ip: RwLock::new(HashMap::new()),
         })
@@ -88,18 +85,21 @@ impl TunnelState {
 
     /// 清除超時未配對的 tunnel 和過期的 token bindings
     pub async fn cleanup_expired(&self) {
-        let mut pending = self.pending.write().await;
-        let expired_tokens: Vec<String> = pending
+        let mut waiting = self.waiting.write().await;
+        let expired_tokens: Vec<String> = waiting
             .iter()
-            .filter(|(_, t)| t.created_at.elapsed() > PAIRING_TIMEOUT)
+            .filter(|(_, w)| w.created_at.elapsed() > PAIRING_TIMEOUT)
             .map(|(token, _)| token.clone())
             .collect();
 
         for token in &expired_tokens {
-            warn!(token = &token[..8], "Tunnel 配對逾時，清理");
-            pending.remove(token);
+            warn!(
+                token = &token[..std::cmp::min(8, token.len())],
+                "Tunnel 配對逾時，清理"
+            );
+            waiting.remove(token);
         }
-        drop(pending);
+        drop(waiting);
 
         if !expired_tokens.is_empty() {
             let mut bindings = self.token_bindings.write().await;
@@ -111,7 +111,7 @@ impl TunnelState {
     }
 }
 
-/// 處理 tunnel WebSocket 連線
+/// 處理 tunnel WebSocket 連線（host 或 joiner 都走同一個入口）
 pub async fn handle_tunnel(
     socket: WebSocket,
     client_ip: IpAddr,
@@ -121,150 +121,117 @@ pub async fn handle_tunnel(
 ) {
     let token_short = token.get(..8).unwrap_or(&token).to_string();
 
-    // IP-bound token 驗證
+    // Token 驗證：必須有 binding（ws.rs JoinRoom 時註冊），且 IP 匹配
     {
         let bindings = tunnel_state.token_bindings.read().await;
-        if let Some(binding) = bindings.get(&token)
-            && !TunnelState::verify_ip(binding, &role, client_ip)
-        {
-            warn!(%token_short, %client_ip, %role, "Tunnel token IP 不匹配");
-            let (mut sender, _) = socket.split();
-            let _ = sender.send(Message::Close(None)).await;
-            return;
-        }
-        // 沒有 binding 的 token 會在 handle_joiner 被拒（pending map 查不到）
-    }
-
-    match role.as_str() {
-        "host" => handle_host(socket, client_ip, token, &token_short, tunnel_state).await,
-        "join" => {
-            // 配對完成後清除 binding
-            tunnel_state.token_bindings.write().await.remove(&token);
-            handle_joiner(socket, client_ip, token, &token_short, tunnel_state).await;
-        }
-        _ => {
-            warn!(%token_short, %role, "無效的 tunnel role");
+        match bindings.get(&token) {
+            None => {
+                warn!(%token_short, %role, "Tunnel token 無效（未註冊）");
+                let (mut sender, _) = socket.split();
+                let _ = sender.send(Message::Close(None)).await;
+                return;
+            }
+            Some(binding) if !TunnelState::verify_ip(binding, &role, client_ip) => {
+                warn!(%token_short, %client_ip, %role, "Tunnel token IP 不匹配");
+                let (mut sender, _) = socket.split();
+                let _ = sender.send(Message::Close(None)).await;
+                return;
+            }
+            Some(_) => {}
         }
     }
-}
 
-async fn handle_host(
-    socket: WebSocket,
-    client_ip: IpAddr,
-    token: String,
-    token_short: &str,
-    tunnel_state: Arc<TunnelState>,
-) {
+    // 嘗試配對：如果已有人在等，配對成功；否則自己等
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    let (host_tx, mut host_rx) = mpsc::channel::<Message>(RELAY_CHANNEL_SIZE);
-    let (paired_tx, paired_rx) = oneshot::channel::<mpsc::Sender<Message>>();
+    let (my_tx, mut my_rx) = mpsc::channel::<Message>(RELAY_CHANNEL_SIZE);
 
-    // 註冊等待配對
-    {
-        let mut pending = tunnel_state.pending.write().await;
-        pending.insert(
-            token.clone(),
-            PendingTunnel {
-                host_tx: host_tx.clone(),
-                paired_notify: paired_tx,
-                host_ip: client_ip,
-                created_at: Instant::now(),
-            },
-        );
-    }
+    // 檢查是否有對方在等
+    let existing = {
+        let mut waiting = tunnel_state.waiting.write().await;
+        waiting.remove(&token)
+    };
 
-    info!(%token_short, %client_ip, "Host tunnel 已註冊，等待 joiner 配對");
+    match existing {
+        Some(peer) => {
+            // 對方已在等，配對成功
+            info!(%token_short, %role, peer_role = %peer.role, "Tunnel 配對成功（第二個到達）");
 
-    // 等待 joiner 配對或超時
-    let joiner_tx = tokio::select! {
-        result = paired_rx => {
-            match result {
-                Ok(tx) => tx,
-                Err(_) => {
-                    warn!(%token_short, "配對 channel 關閉");
+            // 清除 token binding
+            tunnel_state.token_bindings.write().await.remove(&token);
+
+            // 通知對方，把我的 tx 傳過去
+            if peer.notify.send(my_tx.clone()).is_err() {
+                warn!(%token_short, "對方已斷線，無法配對");
+                let _ = ws_sender.send(Message::Close(None)).await;
+                return;
+            }
+
+            // 開始 relay：我用 peer.tx 送資料給對方，對方用 my_tx 送資料給我
+            relay(
+                &mut ws_sender,
+                &mut ws_receiver,
+                &mut my_rx,
+                peer.tx,
+                &token_short,
+                &role,
+            )
+            .await;
+        }
+        None => {
+            // 我是第一個到，等待對方
+            let (notify_tx, notify_rx) = oneshot::channel::<mpsc::Sender<Message>>();
+
+            {
+                let mut waiting = tunnel_state.waiting.write().await;
+                waiting.insert(
+                    token.clone(),
+                    WaitingPeer {
+                        tx: my_tx.clone(),
+                        notify: notify_tx,
+                        role: role.clone(),
+                        created_at: Instant::now(),
+                    },
+                );
+            }
+
+            info!(%token_short, %role, "Tunnel 已註冊，等待對方配對");
+
+            // 等待對方配對或超時
+            let peer_tx = tokio::select! {
+                result = notify_rx => {
+                    match result {
+                        Ok(tx) => tx,
+                        Err(_) => {
+                            warn!(%token_short, "配對 channel 關閉");
+                            return;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(PAIRING_TIMEOUT) => {
+                    warn!(%token_short, %role, "等待配對逾時 ({}s)", PAIRING_TIMEOUT.as_secs());
+                    tunnel_state.waiting.write().await.remove(&token);
+                    let _ = ws_sender.send(Message::Close(None)).await;
                     return;
                 }
-            }
+            };
+
+            // Drop my_tx：唯一的 sender 現在只有對方持有的那份。
+            // 對方 relay 結束時 my_rx.recv() 才會返回 None。
+            drop(my_tx);
+
+            info!(%token_short, %role, "Tunnel 配對成功（第一個到達），開始 relay");
+
+            relay(
+                &mut ws_sender,
+                &mut ws_receiver,
+                &mut my_rx,
+                peer_tx,
+                &token_short,
+                &role,
+            )
+            .await;
         }
-        _ = tokio::time::sleep(PAIRING_TIMEOUT) => {
-            warn!(%token_short, "Host 等待 joiner 配對逾時 ({}s)", PAIRING_TIMEOUT.as_secs());
-            tunnel_state.pending.write().await.remove(&token);
-            let _ = ws_sender.send(Message::Close(None)).await;
-            return;
-        }
-    };
-
-    // Drop 原始 host_tx：唯一的 sender 現在只有 joiner relay 持有的那份。
-    // 這樣 joiner relay 結束時 host_rx.recv() 才會返回 None。
-    drop(host_tx);
-
-    info!(%token_short, "Tunnel 配對成功，開始 relay");
-
-    // 雙向 relay
-    relay(
-        &mut ws_sender,
-        &mut ws_receiver,
-        &mut host_rx,
-        joiner_tx,
-        token_short,
-        "host",
-    )
-    .await;
-}
-
-async fn handle_joiner(
-    socket: WebSocket,
-    client_ip: IpAddr,
-    token: String,
-    token_short: &str,
-    tunnel_state: Arc<TunnelState>,
-) {
-    // 查找對應的 pending tunnel
-    let pending = {
-        let mut pending_map = tunnel_state.pending.write().await;
-        pending_map.remove(&token)
-    };
-
-    let pending = match pending {
-        Some(p) => p,
-        None => {
-            warn!(%token_short, "Tunnel token 無效或已過期");
-            let (mut sender, _) = socket.split();
-            let _ = sender.send(Message::Close(None)).await;
-            return;
-        }
-    };
-
-    // 驗證 token 是否已過期（二次檢查）
-    if pending.created_at.elapsed() > PAIRING_TIMEOUT {
-        warn!(%token_short, "Tunnel token 已過期");
-        let (mut sender, _) = socket.split();
-        let _ = sender.send(Message::Close(None)).await;
-        return;
     }
-
-    info!(%token_short, %client_ip, host_ip = %pending.host_ip, "Joiner 配對成功");
-
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-    let (joiner_tx, mut joiner_rx) = mpsc::channel::<Message>(RELAY_CHANNEL_SIZE);
-
-    // 通知 host 端配對成功，傳送 joiner 的 sender
-    if pending.paired_notify.send(joiner_tx.clone()).is_err() {
-        warn!(%token_short, "Host 已斷線，無法配對");
-        let _ = ws_sender.send(Message::Close(None)).await;
-        return;
-    }
-
-    // 雙向 relay
-    relay(
-        &mut ws_sender,
-        &mut ws_receiver,
-        &mut joiner_rx,
-        pending.host_tx,
-        token_short,
-        "join",
-    )
-    .await;
 }
 
 /// 雙向 binary frame relay with rate limiting
@@ -286,7 +253,6 @@ async fn relay(
 
     loop {
         tokio::select! {
-            // 從對端 relay 來的資料 → 送出去
             msg = rx.recv() => {
                 match msg {
                     Some(m) => {
@@ -303,13 +269,11 @@ async fn relay(
                     }
                 }
             }
-            // 從這端收到的資料 → 轉發給對端
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
                         let len = data.len();
 
-                        // Rate limiting
                         if rate_window_start.elapsed() >= Duration::from_secs(1) {
                             bytes_this_second = 0;
                             rate_window_start = Instant::now();
@@ -385,20 +349,20 @@ mod tests {
     async fn tunnel_state_cleanup_expired() {
         let state = TunnelState::new();
         let (tx, _rx) = mpsc::channel(1);
-        let (paired_tx, _) = oneshot::channel();
+        let (notify_tx, _) = oneshot::channel();
 
-        state.pending.write().await.insert(
+        state.waiting.write().await.insert(
             "test-token".into(),
-            PendingTunnel {
-                host_tx: tx,
-                paired_notify: paired_tx,
-                host_ip: "1.2.3.4".parse().unwrap(),
+            WaitingPeer {
+                tx,
+                notify: notify_tx,
+                role: "host".into(),
                 created_at: Instant::now() - PAIRING_TIMEOUT - Duration::from_secs(1),
             },
         );
 
-        assert_eq!(state.pending.read().await.len(), 1);
+        assert_eq!(state.waiting.read().await.len(), 1);
         state.cleanup_expired().await;
-        assert_eq!(state.pending.read().await.len(), 0);
+        assert_eq!(state.waiting.read().await.len(), 0);
     }
 }
