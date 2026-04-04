@@ -25,12 +25,13 @@ pub struct Room {
     pub room_id: String,
     pub host_player_id: String,
     pub host_nickname: String,
-    pub host_ip: IpAddr,
     pub room_name: String,
     pub map_name: String,
     pub max_players: u8,
     pub current_players: u8,
     pub war3_version: War3Version,
+    /// Host 的 GAMEINFO 封包 bytes（v0.2.0: joiner 加入時回傳）
+    pub gameinfo: Vec<u8>,
 }
 
 pub struct AppState {

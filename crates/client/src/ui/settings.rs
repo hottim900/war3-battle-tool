@@ -59,12 +59,6 @@ pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool
                 }
             }
         }
-        if ui.button("測試 UPnP").clicked() {
-            match crate::net::packet::try_upnp_port_forward(war3_protocol::war3::WAR3_PORT) {
-                Ok(()) => tracing::info!("UPnP port 映射成功"),
-                Err(e) => tracing::warn!("UPnP 失敗: {e}"),
-            }
-        }
     });
 
     ui.add_space(10.0);

@@ -176,12 +176,13 @@ async fn join_room_exchanges_ips() {
     let msgs = drain_messages(&mut joiner).await;
     let jr = find_msg(&msgs, "JoinResult").expect("No JoinResult");
     assert_eq!(jr["success"], true);
-    assert!(jr["host_ip"].is_string());
+    assert!(jr["tunnel_token"].is_string());
+    assert!(jr["room_id"].is_string());
 
     let msgs = drain_messages(&mut host).await;
     let pj = find_msg(&msgs, "PlayerJoined").expect("No PlayerJoined");
     assert_eq!(pj["nickname"], "Joiner");
-    assert!(pj["player_ip"].is_string());
+    assert!(pj["tunnel_token"].is_string());
 }
 
 #[tokio::test]
@@ -286,4 +287,311 @@ async fn two_players_see_each_other() {
         .collect();
     assert!(nicks.contains(&"P1"));
     assert!(nicks.contains(&"P2"));
+}
+
+// ── Tunnel Tests ──
+
+async fn connect_tunnel(port: u16, token: &str, role: &str) -> WsStream {
+    let url = format!("ws://127.0.0.1:{port}/tunnel?token={token}&role={role}");
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws
+}
+
+/// 完整 tunnel relay：host + joiner 配對，雙向 binary 轉發
+#[tokio::test]
+async fn tunnel_relay_roundtrip() {
+    let srv = start_server().await;
+
+    // 1. 註冊 host 和 joiner，建房加入取得 tunnel_token
+    let mut host_ws = connect(srv.port).await;
+    send_json(
+        &mut host_ws,
+        json!({"type": "Register", "nickname": "Host", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut host_ws).await;
+
+    send_json(
+        &mut host_ws,
+        json!({"type": "CreateRoom", "room_name": "R", "map_name": "M", "max_players": 4, "gameinfo": [0xf7, 0x30]}),
+    )
+    .await;
+    let msgs = drain_messages(&mut host_ws).await;
+    let room_id = msgs
+        .iter()
+        .find_map(|m| {
+            m["rooms"]
+                .as_array()?
+                .first()?
+                .get("room_id")?
+                .as_str()
+                .map(String::from)
+        })
+        .expect("No room_id");
+
+    let mut joiner_ws = connect(srv.port).await;
+    send_json(
+        &mut joiner_ws,
+        json!({"type": "Register", "nickname": "Joiner", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut joiner_ws).await;
+
+    send_json(
+        &mut joiner_ws,
+        json!({"type": "JoinRoom", "room_id": room_id}),
+    )
+    .await;
+
+    let msgs = drain_messages(&mut joiner_ws).await;
+    let jr = find_msg(&msgs, "JoinResult").expect("No JoinResult");
+    let joiner_token = jr["tunnel_token"]
+        .as_str()
+        .expect("No tunnel_token")
+        .to_string();
+
+    let msgs = drain_messages(&mut host_ws).await;
+    let pj = find_msg(&msgs, "PlayerJoined").expect("No PlayerJoined");
+    let host_token = pj["tunnel_token"]
+        .as_str()
+        .expect("No tunnel_token")
+        .to_string();
+
+    // host 和 joiner 應該拿到同一個 token
+    assert_eq!(host_token, joiner_token);
+
+    // 2. 開 tunnel WS
+    let mut host_tunnel = connect_tunnel(srv.port, &host_token, "host").await;
+    // 給 host 一點時間註冊
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut joiner_tunnel = connect_tunnel(srv.port, &joiner_token, "join").await;
+    // 給配對一點時間
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 3. joiner → host binary relay
+    let payload = vec![0x01, 0x02, 0x03, 0x04];
+    joiner_tunnel
+        .send(Message::Binary(payload.clone().into()))
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), host_tunnel.next())
+        .await
+        .expect("Timeout waiting for host to receive")
+        .expect("Stream ended")
+        .expect("WS error");
+    match msg {
+        Message::Binary(data) => assert_eq!(data.as_ref(), &payload),
+        other => panic!("Expected Binary, got {other:?}"),
+    }
+
+    // 4. host → joiner binary relay
+    let payload2 = vec![0xaa, 0xbb, 0xcc];
+    host_tunnel
+        .send(Message::Binary(payload2.clone().into()))
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), joiner_tunnel.next())
+        .await
+        .expect("Timeout waiting for joiner to receive")
+        .expect("Stream ended")
+        .expect("WS error");
+    match msg {
+        Message::Binary(data) => assert_eq!(data.as_ref(), &payload2),
+        other => panic!("Expected Binary, got {other:?}"),
+    }
+}
+
+/// Tunnel half-close：一端斷開，另一端應收到 close
+#[tokio::test]
+async fn tunnel_half_close() {
+    let srv = start_server().await;
+
+    // Setup: host + joiner 建房加入
+    let mut host_ws = connect(srv.port).await;
+    send_json(
+        &mut host_ws,
+        json!({"type": "Register", "nickname": "Host", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut host_ws).await;
+
+    send_json(
+        &mut host_ws,
+        json!({"type": "CreateRoom", "room_name": "R", "map_name": "M", "max_players": 4}),
+    )
+    .await;
+    let msgs = drain_messages(&mut host_ws).await;
+    let room_id = msgs
+        .iter()
+        .find_map(|m| {
+            m["rooms"]
+                .as_array()?
+                .first()?
+                .get("room_id")?
+                .as_str()
+                .map(String::from)
+        })
+        .expect("No room_id");
+
+    let mut joiner_ws = connect(srv.port).await;
+    send_json(
+        &mut joiner_ws,
+        json!({"type": "Register", "nickname": "Joiner", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut joiner_ws).await;
+
+    send_json(
+        &mut joiner_ws,
+        json!({"type": "JoinRoom", "room_id": room_id}),
+    )
+    .await;
+
+    let msgs = drain_messages(&mut joiner_ws).await;
+    let jr = find_msg(&msgs, "JoinResult").expect("No JoinResult");
+    let token = jr["tunnel_token"]
+        .as_str()
+        .expect("No tunnel_token")
+        .to_string();
+    drain_messages(&mut host_ws).await; // consume PlayerJoined
+
+    let mut host_tunnel = connect_tunnel(srv.port, &token, "host").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut joiner_tunnel = connect_tunnel(srv.port, &token, "join").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // joiner 斷開
+    joiner_tunnel.close(None).await.unwrap();
+
+    // host 應該收到 close 或 stream 結束
+    let result = tokio::time::timeout(Duration::from_secs(2), host_tunnel.next()).await;
+    match result {
+        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+            // 預期行為：收到 close frame 或 stream 結束
+        }
+        Ok(Some(Err(_))) => {
+            // WS error 也算斷線
+        }
+        other => {
+            panic!("Expected close/end after joiner disconnect, got {other:?}");
+        }
+    }
+}
+
+/// Invalid tunnel token 應被拒絕
+#[tokio::test]
+async fn tunnel_invalid_token() {
+    let srv = start_server().await;
+
+    // 嘗試用不存在的 token 連 tunnel
+    let result = tokio_tungstenite::connect_async(format!(
+        "ws://127.0.0.1:{}/tunnel?token=nonexistent&role=join",
+        srv.port
+    ))
+    .await;
+
+    // joiner 連上後 server 應該關閉連線（token 不存在）
+    match result {
+        Ok((mut ws, _)) => {
+            // 連線成功但 server 應該很快關閉
+            let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+            match msg {
+                Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {}
+                Ok(Some(Err(_))) => {}
+                other => panic!("Expected close for invalid token, got {other:?}"),
+            }
+        }
+        Err(_) => {
+            // 連線被拒也是合理的
+        }
+    }
+}
+
+/// Token 重複使用應被拒絕
+#[tokio::test]
+async fn tunnel_token_reuse_rejected() {
+    let srv = start_server().await;
+
+    // Setup
+    let mut host_ws = connect(srv.port).await;
+    send_json(
+        &mut host_ws,
+        json!({"type": "Register", "nickname": "Host", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut host_ws).await;
+
+    send_json(
+        &mut host_ws,
+        json!({"type": "CreateRoom", "room_name": "R", "map_name": "M", "max_players": 4}),
+    )
+    .await;
+    let msgs = drain_messages(&mut host_ws).await;
+    let room_id = msgs
+        .iter()
+        .find_map(|m| {
+            m["rooms"]
+                .as_array()?
+                .first()?
+                .get("room_id")?
+                .as_str()
+                .map(String::from)
+        })
+        .expect("No room_id");
+
+    let mut joiner_ws = connect(srv.port).await;
+    send_json(
+        &mut joiner_ws,
+        json!({"type": "Register", "nickname": "Joiner", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut joiner_ws).await;
+
+    send_json(
+        &mut joiner_ws,
+        json!({"type": "JoinRoom", "room_id": room_id}),
+    )
+    .await;
+
+    let msgs = drain_messages(&mut joiner_ws).await;
+    let jr = find_msg(&msgs, "JoinResult").expect("No JoinResult");
+    let token = jr["tunnel_token"]
+        .as_str()
+        .expect("No tunnel_token")
+        .to_string();
+    drain_messages(&mut host_ws).await;
+
+    // 第一次使用
+    let mut host_tunnel = connect_tunnel(srv.port, &token, "host").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _joiner_tunnel = connect_tunnel(srv.port, &token, "join").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 第二次用同 token 當 joiner，應該被拒
+    let result = tokio_tungstenite::connect_async(format!(
+        "ws://127.0.0.1:{}/tunnel?token={token}&role=join",
+        srv.port
+    ))
+    .await;
+
+    match result {
+        Ok((mut ws, _)) => {
+            let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+            match msg {
+                Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {}
+                Ok(Some(Err(_))) => {}
+                other => panic!("Expected close for reused token, got {other:?}"),
+            }
+        }
+        Err(_) => {}
+    }
+
+    // 確認第一組 tunnel 仍然正常
+    let payload = vec![0xde, 0xad];
+    host_tunnel
+        .send(Message::Binary(payload.into()))
+        .await
+        .unwrap();
 }

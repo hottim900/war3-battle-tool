@@ -1,15 +1,14 @@
-use std::sync::Arc;
+use std::time::Duration;
 
 use eframe::egui;
 use tokio::sync::mpsc;
 use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo, ServerMessage};
 
-use crate::config::AppConfig;
 use crate::net::discovery::NetEvent;
-use crate::net::packet::PacketSender;
+use crate::net::packet::{RawUdpInjector, check_room};
+use crate::net::tunnel::{self, TunnelEvent};
 use crate::ui::lobby::{LobbyAction, LobbyPanel};
 use crate::ui::log_panel::LogPanel;
-use crate::ui::npcap_check;
 use crate::ui::setup_wizard::SetupWizard;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,7 +30,7 @@ enum ConnectionState {
 enum PendingAction {
     /// User clicked "join" on a room; waiting for JoinResult.
     Joining { room_name: String },
-    /// JoinResult succeeded; tell user to switch to War3 LAN screen.
+    /// JoinResult succeeded; tunnel is connecting.
     JoinSuccess,
     /// JoinResult failed; show error.
     JoinFailed { reason: String },
@@ -40,16 +39,22 @@ enum PendingAction {
 }
 
 pub struct War3App {
-    config: AppConfig,
+    config: crate::config::AppConfig,
     config_changed: bool,
 
     cmd_tx: mpsc::UnboundedSender<ClientMessage>,
     event_rx: mpsc::UnboundedReceiver<NetEvent>,
-    packet_sender: Option<Arc<dyn PacketSender>>,
+
+    /// Tokio runtime handle for spawning tunnel tasks
+    rt_handle: tokio::runtime::Handle,
+    /// Server base URL (e.g. wss://war3.kalthor.cc/ws)
+    server_url: String,
+
+    /// Channel for receiving tunnel events from background tasks
+    tunnel_event_tx: mpsc::UnboundedSender<TunnelEvent>,
+    tunnel_event_rx: mpsc::UnboundedReceiver<TunnelEvent>,
 
     connection_state: ConnectionState,
-    /// Whether we have ever successfully connected (used to distinguish
-    /// initial "connecting" from post-disconnect "reconnecting").
     ever_connected: bool,
     my_player_id: Option<String>,
 
@@ -61,35 +66,37 @@ pub struct War3App {
     lobby: LobbyPanel,
     log_panel: LogPanel,
 
-    /// In-flight action feedback (join / create room).
     pending_action: Option<PendingAction>,
-    /// Manual IP text field shown in offline-fallback mode.
-    manual_ip: String,
 
-    /// Whether Npcap is detected on the system.
-    npcap_available: bool,
+    /// Pending GAMEINFO for injection (set when JoinResult received)
+    pending_gameinfo: Option<Vec<u8>>,
+    /// Handle to the GAMEINFO injection task (for cancellation)
+    injection_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl War3App {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        config: AppConfig,
+        config: crate::config::AppConfig,
         cmd_tx: mpsc::UnboundedSender<ClientMessage>,
         event_rx: mpsc::UnboundedReceiver<NetEvent>,
-        packet_sender: Option<Arc<dyn PacketSender>>,
+        rt_handle: tokio::runtime::Handle,
+        server_url: String,
     ) -> Self {
         setup_cjk_fonts(&cc.egui_ctx);
 
         let needs_wizard = !config.is_configured();
-
-        let npcap_available = npcap_check::is_npcap_available();
+        let (tunnel_event_tx, tunnel_event_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
             config,
             config_changed: false,
             cmd_tx,
             event_rx,
-            packet_sender,
+            rt_handle,
+            server_url,
+            tunnel_event_tx,
+            tunnel_event_rx,
             connection_state: ConnectionState::Disconnected,
             ever_connected: false,
             my_player_id: None,
@@ -104,8 +111,8 @@ impl War3App {
             lobby: LobbyPanel::new(),
             log_panel: LogPanel::new(),
             pending_action: None,
-            manual_ip: String::new(),
-            npcap_available,
+            pending_gameinfo: None,
+            injection_handle: None,
         };
 
         app.log_panel.info("War3 Battle Tool 啟動");
@@ -131,68 +138,70 @@ impl War3App {
         let _ = self.cmd_tx.send(ClientMessage::Register {
             nickname: self.config.nickname.clone(),
             war3_version: self.config.war3_version,
+            client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         });
     }
 
-    /// 玩家端：收到房主 IP 後，取 game info 並注入到本地 War3
-    fn try_inject_join(&mut self, host_ip_str: &str) {
-        let sender = match &self.packet_sender {
-            Some(s) => s.clone(),
-            None => {
-                self.log_panel
-                    .warn("封包注入未啟用（缺少 npcap），請手動加入 LAN 遊戲");
-                return;
-            }
-        };
+    /// 啟動 joiner 端 tunnel 和 GAMEINFO 注入
+    fn start_joiner_tunnel(&mut self, tunnel_token: String, gameinfo: Vec<u8>) {
+        let server_url = self.server_url.clone();
+        let event_tx = self.tunnel_event_tx.clone();
 
-        let host_ip: std::net::Ipv4Addr = match host_ip_str.parse() {
-            Ok(ip) => ip,
-            Err(_) => {
-                self.log_panel.error(format!("無效的 IP: {host_ip_str}"));
-                return;
-            }
-        };
+        self.rt_handle.spawn(async move {
+            tunnel::run_joiner_tunnel(server_url, tunnel_token, event_tx).await;
+        });
 
-        let version = self.config.war3_version;
-        let local_ip: std::net::Ipv4Addr = self
-            .config
-            .local_ip
-            .parse()
-            .unwrap_or(std::net::Ipv4Addr::LOCALHOST);
-
-        match crate::net::packet::join_room(&*sender, host_ip, local_ip, version) {
-            Ok(()) => {
-                self.log_panel
-                    .info("封包注入成功！請切換到 War3 區域網路畫面");
-            }
-            Err(e) => {
-                self.log_panel.error(format!("封包注入失敗: {e}"));
-            }
-        }
+        // 存 GAMEINFO，等 ProxyReady 後開始注入
+        self.pending_gameinfo = Some(gameinfo);
     }
 
-    /// 房主端：有玩家加入時，模擬遠端玩家的 broadcast 讓本機 War3 回應
-    fn try_inject_invite(&mut self, player_ip_str: &str) {
-        let sender = match &self.packet_sender {
-            Some(s) => s.clone(),
-            None => return, // 沒有 npcap，靜默跳過
-        };
+    /// 啟動 host 端 tunnel
+    fn start_host_tunnel(&mut self, tunnel_token: String) {
+        let server_url = self.server_url.clone();
+        let event_tx = self.tunnel_event_tx.clone();
 
-        let player_ip: std::net::Ipv4Addr = match player_ip_str.parse() {
-            Ok(ip) => ip,
-            Err(_) => return,
-        };
+        self.rt_handle.spawn(async move {
+            tunnel::run_host_tunnel(server_url, tunnel_token, event_tx).await;
+        });
+    }
 
-        let version = self.config.war3_version;
-        let local_ip: std::net::Ipv4Addr = self
-            .config
-            .local_ip
-            .parse()
-            .unwrap_or(std::net::Ipv4Addr::LOCALHOST);
-
-        if let Err(e) = crate::net::packet::invite_player(&*sender, player_ip, local_ip, version) {
-            self.log_panel.warn(format!("邀請封包失敗: {e}"));
+    /// 開始 GAMEINFO 注入循環（ProxyReady 時呼叫）
+    fn start_gameinfo_injection(&mut self) {
+        // 取消之前的注入任務
+        if let Some(h) = self.injection_handle.take() {
+            h.abort();
         }
+
+        let gameinfo = match self.pending_gameinfo.take() {
+            Some(gi) if !gi.is_empty() => gi,
+            _ => {
+                self.log_panel.warn("沒有 GAMEINFO 可注入");
+                return;
+            }
+        };
+
+        let handle = self.rt_handle.spawn(async move {
+            let injector = match RawUdpInjector::new() {
+                Ok(i) => i,
+                Err(e) => {
+                    tracing::error!(%e, "RawUdpInjector 建立失敗");
+                    return;
+                }
+            };
+
+            // 持續注入 GAMEINFO，每 3 秒一次，共 60 次（3 分鐘）
+            for _ in 0..60 {
+                if let Err(e) = injector.inject(&gameinfo) {
+                    tracing::warn!(%e, "GAMEINFO 注入失敗");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        });
+        self.injection_handle = Some(handle);
+
+        self.log_panel
+            .info("GAMEINFO 注入開始，請切換到 War3 區域網路畫面加入遊戲");
     }
 
     fn process_network_events(&mut self) {
@@ -220,6 +229,41 @@ impl War3App {
                 NetEvent::ServerMessage(msg) => self.handle_server_message(msg),
             }
         }
+
+        // 處理 tunnel 事件
+        while let Ok(event) = self.tunnel_event_rx.try_recv() {
+            match event {
+                TunnelEvent::ProxyReady => {
+                    self.log_panel.info("Tunnel proxy 就緒");
+                    self.start_gameinfo_injection();
+                }
+                TunnelEvent::Finished { error: None } => {
+                    if let Some(h) = self.injection_handle.take() {
+                        h.abort();
+                    }
+                    self.log_panel.info("Tunnel 連線結束");
+                }
+                TunnelEvent::Finished { error: Some(e) } => {
+                    if let Some(h) = self.injection_handle.take() {
+                        h.abort();
+                    }
+                    self.log_panel.error(format!("Tunnel 錯誤: {e}"));
+                }
+                TunnelEvent::GameinfoCaptured {
+                    room_name,
+                    map_name,
+                    max_players,
+                    gameinfo,
+                } => {
+                    let _ = self.cmd_tx.send(ClientMessage::CreateRoom {
+                        room_name,
+                        map_name,
+                        max_players,
+                        gameinfo,
+                    });
+                }
+            }
+        }
     }
 
     fn handle_server_message(&mut self, msg: ServerMessage) {
@@ -232,7 +276,6 @@ impl War3App {
                 self.players = players;
             }
             ServerMessage::RoomUpdate { rooms } => {
-                // Clear "creating room" pending state once the server confirms
                 if matches!(
                     self.pending_action,
                     Some(PendingAction::CreatingRoom { .. })
@@ -241,13 +284,19 @@ impl War3App {
                 }
                 self.rooms = rooms;
             }
-            ServerMessage::JoinResult { success, host_ip } => {
+            ServerMessage::JoinResult {
+                success,
+                room_id: _,
+                tunnel_token,
+                gameinfo,
+            } => {
                 if success {
                     self.pending_action = Some(PendingAction::JoinSuccess);
-                    if let Some(ip) = host_ip {
-                        self.log_panel
-                            .info(format!("取得房主 IP: {ip}，正在注入封包..."));
-                        self.try_inject_join(&ip);
+                    if let (Some(token), Some(gi)) = (tunnel_token, gameinfo) {
+                        self.log_panel.info("加入成功！正在建立 tunnel 連線...");
+                        self.start_joiner_tunnel(token, gi);
+                    } else {
+                        self.log_panel.warn("加入成功但缺少 tunnel 資訊");
                     }
                 } else {
                     self.pending_action = Some(PendingAction::JoinFailed {
@@ -258,12 +307,15 @@ impl War3App {
             }
             ServerMessage::PlayerJoined {
                 nickname,
-                player_ip,
+                tunnel_token,
             } => {
-                self.log_panel.info(format!(
-                    "玩家 {nickname} 加入，正在邀請... (IP: {player_ip})"
-                ));
-                self.try_inject_invite(&player_ip);
+                self.log_panel
+                    .info(format!("玩家 {nickname} 加入，建立 tunnel..."));
+                self.start_host_tunnel(tunnel_token);
+            }
+            ServerMessage::TunnelReady { tunnel_token } => {
+                self.log_panel.info("Tunnel 就緒，建立連線...");
+                self.start_host_tunnel(tunnel_token);
             }
             ServerMessage::Error { message } => {
                 self.log_panel.error(format!("伺服器錯誤: {message}"));
@@ -271,13 +323,10 @@ impl War3App {
         }
     }
 
-    /// Returns true if the connection state requires a full-screen overlay
-    /// (i.e. the lobby should NOT be shown).
     fn show_connection_overlay(&mut self, ui: &mut egui::Ui) -> bool {
         match &self.connection_state {
             ConnectionState::Connected => false,
             ConnectionState::Disconnected if !self.ever_connected => {
-                // Initial startup: haven't connected yet
                 ui.vertical_centered(|ui| {
                     ui.add_space(80.0);
                     ui.spinner();
@@ -286,13 +335,8 @@ impl War3App {
                 });
                 true
             }
-            ConnectionState::Disconnected => {
-                // Was connected before, now disconnected (terminal)
-                false
-            }
+            ConnectionState::Disconnected => false,
             ConnectionState::Reconnecting { attempt } if *attempt > 5 => {
-                let attempt = *attempt;
-                // Offline fallback mode
                 ui.vertical_centered(|ui| {
                     ui.add_space(60.0);
                     ui.colored_label(
@@ -300,33 +344,13 @@ impl War3App {
                         egui::RichText::new("離線模式").size(20.0).strong(),
                     );
                     ui.add_space(8.0);
-                    ui.label(format!("已嘗試重新連線 {attempt} 次，伺服器可能離線。",));
+                    ui.label(format!("已嘗試重新連線 {} 次，伺服器可能離線。", attempt));
                     ui.add_space(16.0);
-                    ui.label("你可以手動輸入房主 IP 加入區域網路遊戲：");
-                    ui.add_space(8.0);
-
-                    ui.horizontal(|ui| {
-                        let max_width = 200.0;
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.manual_ip)
-                                .hint_text("房主 IP 位址")
-                                .desired_width(max_width),
-                        );
-                        let valid = !self.manual_ip.trim().is_empty();
-                        if ui
-                            .add_enabled(valid, egui::Button::new("手動加入"))
-                            .clicked()
-                        {
-                            let ip = self.manual_ip.trim().to_string();
-                            self.log_panel.info(format!("手動加入: {ip}"));
-                            self.try_inject_join(&ip);
-                        }
-                    });
+                    ui.label("請等待伺服器恢復後自動重連。");
                 });
                 true
             }
             ConnectionState::Reconnecting { attempt } => {
-                // Still within retry window
                 ui.vertical_centered(|ui| {
                     ui.add_space(80.0);
                     ui.spinner();
@@ -340,8 +364,6 @@ impl War3App {
         }
     }
 
-    /// Shows pending action feedback (join / create room) as a banner at the
-    /// top of the lobby. Returns true if the banner was shown.
     fn show_pending_action_banner(&mut self, ui: &mut egui::Ui) -> bool {
         let action = match &self.pending_action {
             Some(a) => a.clone(),
@@ -444,18 +466,6 @@ impl eframe::App for War3App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_network_events();
 
-        // Npcap 檢查：若缺少 npcap 則顯示阻擋畫面
-        if !self.npcap_available {
-            match npcap_check::show_npcap_missing_panel(ctx) {
-                npcap_check::NpcapPanelAction::Recheck => {
-                    self.npcap_available = npcap_check::is_npcap_available();
-                }
-                npcap_check::NpcapPanelAction::None => {}
-            }
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-            return;
-        }
-
         // 首次設定精靈
         if let Some(wizard) = &mut self.wizard {
             wizard.show(ctx);
@@ -489,12 +499,10 @@ impl eframe::App for War3App {
         let is_hosting = self.is_hosting();
         egui::CentralPanel::default().show(ctx, |ui| match self.current_tab {
             Tab::Lobby => {
-                // Connection-state overlay (connecting / reconnecting / offline)
                 if self.show_connection_overlay(ui) {
                     return;
                 }
 
-                // Pending action banner (joining / creating)
                 self.show_pending_action_banner(ui);
 
                 let my_nickname = if self.config.is_configured() {
@@ -515,16 +523,30 @@ impl eframe::App for War3App {
                     LobbyAction::JoinRoom { room_name } => {
                         self.pending_action = Some(PendingAction::Joining { room_name });
                     }
-                    LobbyAction::CreateRoom { room_name } => {
-                        // Attempt UPnP port forwarding before creating room
-                        if let Err(e) = crate::net::packet::try_upnp_port_forward(
-                            war3_protocol::war3::WAR3_PORT,
-                        ) {
-                            tracing::warn!("UPnP 失敗，請確保 port 6112 已開放: {e}");
-                            self.log_panel.warn("UPnP 失敗，請確保 port 6112 已開放");
-                        } else {
-                            self.log_panel.info("UPnP port 映射成功");
-                        }
+                    LobbyAction::CreateRoom {
+                        room_name,
+                        map_name,
+                        max_players,
+                    } => {
+                        // 在背景擷取 GAMEINFO（blocking UDP call），避免凍結 UI
+                        let version = self.config.war3_version;
+                        let event_tx = self.tunnel_event_tx.clone();
+                        let rn = room_name.clone();
+                        self.rt_handle.spawn(async move {
+                            let gameinfo = tokio::task::spawn_blocking(move || {
+                                check_room(std::net::Ipv4Addr::LOCALHOST, version)
+                                    .unwrap_or_default()
+                            })
+                            .await
+                            .unwrap_or_default();
+
+                            let _ = event_tx.send(TunnelEvent::GameinfoCaptured {
+                                room_name: rn,
+                                map_name,
+                                max_players,
+                                gameinfo,
+                            });
+                        });
                         self.pending_action = Some(PendingAction::CreatingRoom { room_name });
                     }
                 }
