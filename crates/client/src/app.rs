@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -77,6 +78,9 @@ pub struct War3App {
 
     /// Lobby RTT 測量（ms），由 discovery 更新
     latency_ms: Arc<AtomicU64>,
+
+    /// P2P 直連：對方 IP（從 StunInfo 接收）
+    peer_addr: Option<SocketAddr>,
 }
 
 impl War3App {
@@ -120,6 +124,7 @@ impl War3App {
             pending_gameinfo: None,
             injection_handle: None,
             latency_ms,
+            peer_addr: None,
         };
 
         app.log_panel.info("War3 Battle Tool 啟動");
@@ -153,9 +158,10 @@ impl War3App {
     fn start_joiner_tunnel(&mut self, tunnel_token: String, gameinfo: Vec<u8>) {
         let server_url = self.server_url.clone();
         let event_tx = self.tunnel_event_tx.clone();
+        let peer_addr = self.peer_addr.take();
 
         self.rt_handle.spawn(async move {
-            tunnel::run_joiner_tunnel(server_url, tunnel_token, event_tx).await;
+            tunnel::run_joiner_tunnel(server_url, tunnel_token, peer_addr, event_tx).await;
         });
 
         // 存 GAMEINFO，等 ProxyReady 後開始注入
@@ -166,9 +172,10 @@ impl War3App {
     fn start_host_tunnel(&mut self, tunnel_token: String) {
         let server_url = self.server_url.clone();
         let event_tx = self.tunnel_event_tx.clone();
+        let peer_addr = self.peer_addr.take();
 
         self.rt_handle.spawn(async move {
-            tunnel::run_host_tunnel(server_url, tunnel_token, event_tx).await;
+            tunnel::run_host_tunnel(server_url, tunnel_token, peer_addr, event_tx).await;
         });
     }
 
@@ -323,6 +330,12 @@ impl War3App {
             ServerMessage::TunnelReady { tunnel_token } => {
                 self.log_panel.info("Tunnel 就緒，建立連線...");
                 self.start_host_tunnel(tunnel_token);
+            }
+            ServerMessage::StunInfo { peer_addr } => {
+                if let Ok(ip) = peer_addr.parse::<std::net::IpAddr>() {
+                    self.peer_addr = Some(SocketAddr::new(ip, 0));
+                    self.log_panel.info("收到 P2P 直連資訊");
+                }
             }
             ServerMessage::Pong { .. } => {
                 // 已在 discovery.rs 處理，不會到這裡

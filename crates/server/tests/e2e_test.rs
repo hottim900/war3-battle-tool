@@ -595,3 +595,77 @@ async fn tunnel_token_reuse_rejected() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn stun_info_only_unicast_to_participants() {
+    let srv = start_server().await;
+
+    // 三個玩家：host, joiner, bystander
+    let mut host = connect(srv.port).await;
+    send_json(
+        &mut host,
+        json!({"type": "Register", "nickname": "Host", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut host).await;
+
+    let mut joiner = connect(srv.port).await;
+    send_json(
+        &mut joiner,
+        json!({"type": "Register", "nickname": "Joiner", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut joiner).await;
+
+    let mut bystander = connect(srv.port).await;
+    send_json(
+        &mut bystander,
+        json!({"type": "Register", "nickname": "Bystander", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut bystander).await;
+
+    // Host 建房
+    send_json(
+        &mut host,
+        json!({"type": "CreateRoom", "room_name": "R", "map_name": "M", "max_players": 4}),
+    )
+    .await;
+    let msgs = drain_messages(&mut host).await;
+    let room_id = msgs
+        .iter()
+        .find_map(|m| {
+            m["rooms"]
+                .as_array()?
+                .first()?
+                .get("room_id")?
+                .as_str()
+                .map(String::from)
+        })
+        .expect("No room_id");
+    drain_messages(&mut bystander).await;
+
+    // Joiner 加入
+    send_json(&mut joiner, json!({"type": "JoinRoom", "room_id": room_id})).await;
+
+    // Joiner 應收到 StunInfo
+    let joiner_msgs = drain_messages(&mut joiner).await;
+    assert!(
+        find_msg(&joiner_msgs, "StunInfo").is_some(),
+        "Joiner should receive StunInfo"
+    );
+
+    // Host 應收到 StunInfo
+    let host_msgs = drain_messages(&mut host).await;
+    assert!(
+        find_msg(&host_msgs, "StunInfo").is_some(),
+        "Host should receive StunInfo"
+    );
+
+    // Bystander 不應收到 StunInfo
+    let bystander_msgs = drain_messages(&mut bystander).await;
+    assert!(
+        find_msg(&bystander_msgs, "StunInfo").is_none(),
+        "Bystander should NOT receive StunInfo"
+    );
+}

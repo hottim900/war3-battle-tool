@@ -338,6 +338,14 @@ pub async fn handle_socket(
                         tunnel_token: tunnel_token.clone(),
                     });
 
+                    // P2P 直連：送 StunInfo 給雙方（unicast，不走 broadcast）
+                    let _ = tx.try_send(ServerMessage::StunInfo {
+                        peer_addr: host_ip.to_string(),
+                    });
+                    let _ = host.tx.try_send(ServerMessage::StunInfo {
+                        peer_addr: client_ip.to_string(),
+                    });
+
                     drop(players);
 
                     // 先寫 joined_room（清舊房 + 設新房），再 increment room count

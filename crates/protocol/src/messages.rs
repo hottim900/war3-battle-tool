@@ -68,6 +68,8 @@ pub enum ServerMessage {
     },
     /// 通知 host：tunnel 已準備好（多人遊戲時，每個新 joiner 觸發一次）
     TunnelReady { tunnel_token: String },
+    /// P2P 直連資訊：僅透過 unicast player tx 發送，不經 broadcast_state
+    StunInfo { peer_addr: String },
     /// 延遲測量：原封回傳 client 的 ts
     Pong { ts: u64 },
     /// 錯誤
