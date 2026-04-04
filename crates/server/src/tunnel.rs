@@ -25,9 +25,17 @@ struct PendingTunnel {
     created_at: Instant,
 }
 
+/// Token 綁定的 IP 資訊（JoinRoom 時建立）
+struct TokenBinding {
+    host_ip: IpAddr,
+    joiner_ip: IpAddr,
+}
+
 pub struct TunnelState {
     /// token → 等待配對的 tunnel（host 先到）
     pending: RwLock<HashMap<String, PendingTunnel>>,
+    /// token → IP binding（JoinRoom 時註冊，/tunnel 連線時驗證）
+    token_bindings: RwLock<HashMap<String, TokenBinding>>,
     /// per-IP tunnel 連線數
     connections_per_ip: RwLock<HashMap<IpAddr, u32>>,
 }
@@ -36,6 +44,7 @@ impl TunnelState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             pending: RwLock::new(HashMap::new()),
+            token_bindings: RwLock::new(HashMap::new()),
             connections_per_ip: RwLock::new(HashMap::new()),
         })
     }
@@ -50,6 +59,23 @@ impl TunnelState {
         true
     }
 
+    /// 註冊 token 的 IP 綁定（ws.rs JoinRoom 時呼叫）
+    pub async fn register_token(&self, token: String, host_ip: IpAddr, joiner_ip: IpAddr) {
+        self.token_bindings
+            .write()
+            .await
+            .insert(token, TokenBinding { host_ip, joiner_ip });
+    }
+
+    /// 驗證 token 的 IP 是否匹配
+    fn verify_ip(binding: &TokenBinding, role: &str, client_ip: IpAddr) -> bool {
+        match role {
+            "host" => binding.host_ip == client_ip,
+            "join" => binding.joiner_ip == client_ip,
+            _ => false,
+        }
+    }
+
     pub async fn release_tunnel_connection(&self, ip: IpAddr) {
         let mut conns = self.connections_per_ip.write().await;
         if let Some(count) = conns.get_mut(&ip) {
@@ -60,20 +86,27 @@ impl TunnelState {
         }
     }
 
-    /// 清除超時未配對的 tunnel
+    /// 清除超時未配對的 tunnel 和過期的 token bindings
     pub async fn cleanup_expired(&self) {
         let mut pending = self.pending.write().await;
-        let before = pending.len();
-        pending.retain(|token, t| {
-            let expired = t.created_at.elapsed() > PAIRING_TIMEOUT;
-            if expired {
-                warn!(token = &token[..8], "Tunnel 配對逾時，清理");
+        let expired_tokens: Vec<String> = pending
+            .iter()
+            .filter(|(_, t)| t.created_at.elapsed() > PAIRING_TIMEOUT)
+            .map(|(token, _)| token.clone())
+            .collect();
+
+        for token in &expired_tokens {
+            warn!(token = &token[..8], "Tunnel 配對逾時，清理");
+            pending.remove(token);
+        }
+        drop(pending);
+
+        if !expired_tokens.is_empty() {
+            let mut bindings = self.token_bindings.write().await;
+            for token in &expired_tokens {
+                bindings.remove(token);
             }
-            !expired
-        });
-        let removed = before - pending.len();
-        if removed > 0 {
-            info!(removed, "清理過期 tunnel sessions");
+            info!(removed = expired_tokens.len(), "清理過期 tunnel sessions");
         }
     }
 }
@@ -88,9 +121,27 @@ pub async fn handle_tunnel(
 ) {
     let token_short = token.get(..8).unwrap_or(&token).to_string();
 
+    // IP-bound token 驗證
+    {
+        let bindings = tunnel_state.token_bindings.read().await;
+        if let Some(binding) = bindings.get(&token)
+            && !TunnelState::verify_ip(binding, &role, client_ip)
+        {
+            warn!(%token_short, %client_ip, %role, "Tunnel token IP 不匹配");
+            let (mut sender, _) = socket.split();
+            let _ = sender.send(Message::Close(None)).await;
+            return;
+        }
+        // 沒有 binding 的 token 會在 handle_joiner 被拒（pending map 查不到）
+    }
+
     match role.as_str() {
         "host" => handle_host(socket, client_ip, token, &token_short, tunnel_state).await,
-        "join" => handle_joiner(socket, client_ip, token, &token_short, tunnel_state).await,
+        "join" => {
+            // 配對完成後清除 binding
+            tunnel_state.token_bindings.write().await.remove(&token);
+            handle_joiner(socket, client_ip, token, &token_short, tunnel_state).await;
+        }
         _ => {
             warn!(%token_short, %role, "無效的 tunnel role");
         }

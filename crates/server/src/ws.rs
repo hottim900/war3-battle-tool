@@ -10,6 +10,7 @@ use uuid::Uuid;
 use war3_protocol::messages::{ClientMessage, ServerMessage};
 
 use crate::state::{AppState, ConnectedPlayer, Room};
+use crate::tunnel::TunnelState;
 
 const MAX_MESSAGES_PER_SECOND: u32 = 10;
 const MAX_MESSAGE_SIZE: usize = 4096;
@@ -46,7 +47,12 @@ impl RateLimiter {
 }
 
 /// 處理單個 WebSocket 連線
-pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppState>) {
+pub async fn handle_socket(
+    socket: WebSocket,
+    client_ip: IpAddr,
+    state: Arc<AppState>,
+    tunnel_state: Arc<TunnelState>,
+) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
 
@@ -69,6 +75,7 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
     let mut registered = false;
     let mut rate_limiter = RateLimiter::new();
     let mut last_join_at: Option<Instant> = None;
+    let mut join_pending = false;
 
     let receive_loop = async {
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -248,6 +255,13 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                         continue;
                     }
 
+                    if join_pending {
+                        let _ = tx.try_send(ServerMessage::Error {
+                            message: "正在加入中，請稍候".into(),
+                        });
+                        continue;
+                    }
+
                     if let Some(last) = last_join_at
                         && last.elapsed() < JOIN_COOLDOWN
                     {
@@ -294,16 +308,21 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                         continue;
                     }
 
-                    let host_online = players
-                        .get(&host_player_id)
-                        .map(|p| p.disconnected_at.is_none())
-                        .unwrap_or(false);
-                    if !host_online {
-                        let _ = tx.try_send(ServerMessage::join_failure());
-                        continue;
-                    }
+                    let host = match players.get(&host_player_id) {
+                        Some(p) if p.disconnected_at.is_none() => p,
+                        _ => {
+                            let _ = tx.try_send(ServerMessage::join_failure());
+                            continue;
+                        }
+                    };
+                    let host_ip = host.client_ip;
 
                     let tunnel_token = Uuid::new_v4().to_string();
+
+                    // 註冊 IP-bound token
+                    tunnel_state
+                        .register_token(tunnel_token.clone(), host_ip, client_ip)
+                        .await;
 
                     let _ = tx.try_send(ServerMessage::JoinResult {
                         success: true,
@@ -318,12 +337,10 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
 
                     let joiner_nickname = joiner.nickname.clone();
 
-                    if let Some(host) = players.get(&host_player_id) {
-                        let _ = host.tx.try_send(ServerMessage::PlayerJoined {
-                            nickname: joiner_nickname,
-                            tunnel_token: tunnel_token.clone(),
-                        });
-                    }
+                    let _ = host.tx.try_send(ServerMessage::PlayerJoined {
+                        nickname: joiner_nickname,
+                        tunnel_token: tunnel_token.clone(),
+                    });
 
                     drop(players);
 
@@ -349,6 +366,7 @@ pub async fn handle_socket(socket: WebSocket, client_ip: IpAddr, state: Arc<AppS
                     }
 
                     last_join_at = Some(Instant::now());
+                    join_pending = true;
                     info!(%room_id, %player_id, "玩家加入房間");
                     state.broadcast_state().await;
                 }

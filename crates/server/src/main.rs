@@ -105,9 +105,10 @@ async fn ws_handler(
             .into_response();
     }
 
+    let tunnel_state = shared.tunnel.clone();
     info!(%client_ip, "WebSocket 連線");
     ws.on_upgrade(move |socket| async move {
-        ws::handle_socket(socket, client_ip, state.clone()).await;
+        ws::handle_socket(socket, client_ip, state.clone(), tunnel_state).await;
         state.release_connection(client_ip).await;
     })
     .into_response()
