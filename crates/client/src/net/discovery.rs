@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -8,8 +10,16 @@ use tracing::{error, info, warn};
 use war3_protocol::messages::{ClientMessage, ServerMessage};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const PING_INTERVAL: Duration = Duration::from_secs(5);
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 /// 從網路層送回 UI 的事件
 #[derive(Debug, Clone)]
@@ -25,6 +35,7 @@ pub async fn run_connection(
     server_url: String,
     mut cmd_rx: mpsc::UnboundedReceiver<ClientMessage>,
     event_tx: mpsc::UnboundedSender<NetEvent>,
+    latency_ms: Arc<AtomicU64>,
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     let mut attempt: u32 = 0;
@@ -41,7 +52,8 @@ pub async fn run_connection(
 
                 let _ = event_tx.send(NetEvent::Connected);
 
-                let disconnected = handle_session(ws_stream, &mut cmd_rx, &event_tx).await;
+                let disconnected =
+                    handle_session(ws_stream, &mut cmd_rx, &event_tx, &latency_ms).await;
                 let _ = event_tx.send(NetEvent::Disconnected);
 
                 if !disconnected {
@@ -69,9 +81,11 @@ async fn handle_session(
     >,
     cmd_rx: &mut mpsc::UnboundedReceiver<ClientMessage>,
     event_tx: &mpsc::UnboundedSender<NetEvent>,
+    latency_ms: &AtomicU64,
 ) -> bool {
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    let mut ping_timer = tokio::time::interval(PING_INTERVAL);
 
     loop {
         tokio::select! {
@@ -91,6 +105,10 @@ async fn handle_session(
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<ServerMessage>(&text) {
+                            Ok(ServerMessage::Pong { ts }) => {
+                                let rtt = now_ms().saturating_sub(ts);
+                                latency_ms.store(rtt, Ordering::Relaxed);
+                            }
                             Ok(server_msg) => {
                                 let _ = event_tx.send(NetEvent::ServerMessage(server_msg));
                             }
@@ -110,6 +128,13 @@ async fn handle_session(
 
             _ = heartbeat.tick() => {
                 let json = serde_json::to_string(&ClientMessage::Heartbeat).unwrap();
+                if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                    return true;
+                }
+            }
+
+            _ = ping_timer.tick() => {
+                let json = serde_json::to_string(&ClientMessage::Ping { ts: now_ms() }).unwrap();
                 if ws_tx.send(Message::Text(json.into())).await.is_err() {
                     return true;
                 }

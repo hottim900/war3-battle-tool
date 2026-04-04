@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use eframe::egui;
@@ -72,6 +74,9 @@ pub struct War3App {
     pending_gameinfo: Option<Vec<u8>>,
     /// Handle to the GAMEINFO injection task (for cancellation)
     injection_handle: Option<tokio::task::JoinHandle<()>>,
+
+    /// Lobby RTT 測量（ms），由 discovery 更新
+    latency_ms: Arc<AtomicU64>,
 }
 
 impl War3App {
@@ -82,6 +87,7 @@ impl War3App {
         event_rx: mpsc::UnboundedReceiver<NetEvent>,
         rt_handle: tokio::runtime::Handle,
         server_url: String,
+        latency_ms: Arc<AtomicU64>,
     ) -> Self {
         setup_cjk_fonts(&cc.egui_ctx);
 
@@ -113,6 +119,7 @@ impl War3App {
             pending_action: None,
             pending_gameinfo: None,
             injection_handle: None,
+            latency_ms,
         };
 
         app.log_panel.info("War3 Battle Tool 啟動");
@@ -317,6 +324,9 @@ impl War3App {
                 self.log_panel.info("Tunnel 就緒，建立連線...");
                 self.start_host_tunnel(tunnel_token);
             }
+            ServerMessage::Pong { .. } => {
+                // 已在 discovery.rs 處理，不會到這裡
+            }
             ServerMessage::Error { message } => {
                 self.log_panel.error(format!("伺服器錯誤: {message}"));
             }
@@ -510,6 +520,7 @@ impl eframe::App for War3App {
                 } else {
                     None
                 };
+                let latency = self.latency_ms.load(Ordering::Relaxed);
                 let action = self.lobby.show(
                     ui,
                     &self.rooms,
@@ -517,6 +528,7 @@ impl eframe::App for War3App {
                     my_nickname,
                     is_hosting,
                     &self.cmd_tx,
+                    latency,
                 );
                 match action {
                     LobbyAction::None => {}

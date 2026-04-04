@@ -35,6 +35,7 @@ impl LobbyPanel {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -43,11 +44,26 @@ impl LobbyPanel {
         my_nickname: Option<&str>,
         is_hosting: bool,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
+        latency_ms: u64,
     ) -> LobbyAction {
         let mut action = LobbyAction::None;
 
         // 房間區塊
-        ui.heading("房間列表");
+        ui.horizontal(|ui| {
+            ui.heading("房間列表");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if latency_ms > 0 {
+                    let color = if latency_ms < 30 {
+                        egui::Color32::from_rgb(100, 200, 100) // 綠
+                    } else if latency_ms < 80 {
+                        egui::Color32::from_rgb(255, 200, 100) // 黃
+                    } else {
+                        egui::Color32::from_rgb(255, 100, 100) // 紅
+                    };
+                    ui.colored_label(color, format!("延遲: {latency_ms}ms"));
+                }
+            });
+        });
         ui.separator();
 
         if rooms.is_empty() {

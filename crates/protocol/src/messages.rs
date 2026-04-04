@@ -37,6 +37,8 @@ pub enum ClientMessage {
     CloseRoom,
     /// 玩家請求加入房間
     JoinRoom { room_id: String },
+    /// 延遲測量：client 送 ts，server 原封回傳
+    Ping { ts: u64 },
 }
 
 // ── Server → Client ──
@@ -66,6 +68,8 @@ pub enum ServerMessage {
     },
     /// 通知 host：tunnel 已準備好（多人遊戲時，每個新 joiner 觸發一次）
     TunnelReady { tunnel_token: String },
+    /// 延遲測量：原封回傳 client 的 ts
+    Pong { ts: u64 },
     /// 錯誤
     Error { message: String },
 }

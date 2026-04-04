@@ -249,6 +249,10 @@ pub async fn handle_socket(
                     }
                 }
 
+                ClientMessage::Ping { ts } => {
+                    let _ = tx.try_send(ServerMessage::Pong { ts });
+                }
+
                 ClientMessage::JoinRoom { room_id } => {
                     if !registered {
                         continue;
