@@ -63,8 +63,8 @@ pub fn parse_gameinfo(data: &[u8]) -> Option<GameinfoFields> {
     let name_end = data[name_start..].iter().position(|&b| b == 0)?;
     let game_name = String::from_utf8_lossy(&data[name_start..name_start + name_end]).into_owned();
 
-    // After game name null terminator, skip 1 byte (padding), then encoded stat string
-    let stat_start = name_start + name_end + 1;
+    // After game name: null terminator + separator byte, then stat string
+    let stat_start = name_start + name_end + 2;
 
     // Stat string 以 0x00 結尾，裡面包含 encoded game settings
     // 解碼 stat string 取得 map path
@@ -81,7 +81,7 @@ pub fn parse_gameinfo(data: &[u8]) -> Option<GameinfoFields> {
 /// W3GS stat string 解碼，取得 map path
 ///
 /// Stat string 是 War3 自訂的編碼格式：
-/// 每 3 個 encoded bytes → 3 個 decoded bytes（用 mask byte 還原 null/low bytes）
+/// 每 1 mask byte + 7 data bytes 為一組（mask 的每個 bit 表示對應 byte 是否需要 -1 還原）
 fn decode_stat_string(data: &[u8], start: usize) -> Option<String> {
     if start >= data.len() {
         return None;
@@ -95,13 +95,13 @@ fn decode_stat_string(data: &[u8], start: usize) -> Option<String> {
         return None;
     }
 
-    // War3 stat string decoding
+    // War3 stat string decoding: 1 mask byte + 7 data bytes per group
     let mut decoded = Vec::new();
     let mut i = 0;
     while i < encoded.len() {
         let mask = encoded[i];
         i += 1;
-        for bit in 0..3 {
+        for bit in 0..7 {
             if i >= encoded.len() {
                 break;
             }
