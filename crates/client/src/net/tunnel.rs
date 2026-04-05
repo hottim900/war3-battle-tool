@@ -327,8 +327,11 @@ async fn bridge_tcp_ws_with_swap(
     let mut total_ws_to_tcp: u64 = 0;
     let mut buf = [0u8; RELAY_BUF_SIZE];
 
-    // WS Ping 延遲測量
-    let mut ping_timer = tokio::time::interval(TUNNEL_PING_INTERVAL);
+    // WS Ping 延遲測量（第一次延後，避免測到 connection setup）
+    let mut ping_timer = tokio::time::interval_at(
+        tokio::time::Instant::now() + TUNNEL_PING_INTERVAL,
+        TUNNEL_PING_INTERVAL,
+    );
     let mut ping_sent_at: Option<tokio::time::Instant> = None;
 
     // Phase 1: WS relay（可被 swap 中斷）
@@ -393,10 +396,12 @@ async fn bridge_tcp_ws_with_swap(
                 }
                 // channel closed → 背景 QUIC 失敗，繼續 WS relay
             }
-            // 定期 WS Ping 測量延遲
+            // 定期 WS Ping 測量延遲（前一個 Pong 還沒回來就跳過）
             _ = ping_timer.tick() => {
-                ping_sent_at = Some(tokio::time::Instant::now());
-                let _ = ws_sender.send(Message::Ping(Vec::new().into())).await;
+                if ping_sent_at.is_none() {
+                    ping_sent_at = Some(tokio::time::Instant::now());
+                    let _ = ws_sender.send(Message::Ping(Vec::new().into())).await;
+                }
             }
         }
     };
