@@ -249,6 +249,10 @@ pub async fn handle_socket(
                     }
                 }
 
+                ClientMessage::Ping { ts } => {
+                    let _ = tx.try_send(ServerMessage::Pong { ts });
+                }
+
                 ClientMessage::JoinRoom { room_id } => {
                     if !registered {
                         continue;
@@ -332,6 +336,14 @@ pub async fn handle_socket(
                     let _ = host.tx.try_send(ServerMessage::PlayerJoined {
                         nickname: joiner_nickname,
                         tunnel_token: tunnel_token.clone(),
+                    });
+
+                    // P2P 直連：送 StunInfo 給雙方（unicast，不走 broadcast）
+                    let _ = tx.try_send(ServerMessage::StunInfo {
+                        peer_addr: host_ip.to_string(),
+                    });
+                    let _ = host.tx.try_send(ServerMessage::StunInfo {
+                        peer_addr: client_ip.to_string(),
                     });
 
                     drop(players);

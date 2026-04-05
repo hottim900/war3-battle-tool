@@ -3,6 +3,9 @@ mod config;
 mod net;
 mod ui;
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+
 use tokio::sync::mpsc;
 
 use app::War3App;
@@ -30,13 +33,16 @@ fn main() {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ClientMessage>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<NetEvent>();
 
+    let latency_ms = Arc::new(AtomicU64::new(0));
+
     // 在背景執行緒啟動 tokio runtime（必須在 eframe::run_native 之前）
     let rt = tokio::runtime::Runtime::new().expect("無法建立 tokio runtime");
     let rt_handle = rt.handle().clone();
     let server_url_clone = server_url.clone();
+    let latency_clone = latency_ms.clone();
     std::thread::spawn(move || {
         rt.block_on(async {
-            discovery::run_connection(server_url_clone, cmd_rx, event_tx).await;
+            discovery::run_connection(server_url_clone, cmd_rx, event_tx, latency_clone).await;
         });
     });
 
@@ -52,7 +58,7 @@ fn main() {
         native_options,
         Box::new(move |cc| {
             Ok(Box::new(War3App::new(
-                cc, config, cmd_tx, event_rx, rt_handle, server_url,
+                cc, config, cmd_tx, event_rx, rt_handle, server_url, latency_ms,
             )))
         }),
     )

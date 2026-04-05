@@ -20,6 +20,23 @@
 ### ~~NpcapSender 程式碼品質~~
 - **Completed:** v0.2.0 (2026-04-04) — npcap 已移除，改用 raw UDP + tunnel relay
 
+### Phase 2: Mid-game Hot Swap (DEFERRED)
+- 遊戲中從 relay 切換到 QUIC 直連，零資料遺失
+- **Blocked by:**
+  - Data loss during swap（drain 期間 War3 繼續送資料，try_send 丟棄）
+  - Asymmetric commit（一方 swap 另一方沒收到 commit）
+  - 需要 SwapPause + SwapAck 額外 protocol
+  - Premise 5 未驗證（proxy layer mid-game transport switch）
+- **Why deferred:** Phase 1 pre-game 路徑選擇已解決 90% 延遲問題，當前用戶量不支撐這個複雜度
+- **When:** 用戶量成長 + Phase 1 WAN 驗證完成後
+
+### P2P 延伸
+- [ ] UPnP 支援（~50 行，40% 額外直連率，零風險 quick win）
+- [ ] 多人 QUIC（>2 人目前用 WS relay）
+- [ ] QUIC stream 斷線後 WS 重建
+- [ ] Binary size CI gate（監控依賴膨脹）
+- [ ] 台灣 ISP hole punch 成功率實測（中華電信 vs 手機熱點）
+
 ### 多區域 Relay Server
 - 目前只有東京一個 VPS，台灣雙方延遲 ~60ms
 - 評估新加坡或香港 VPS 降低延遲
