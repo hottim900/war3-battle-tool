@@ -79,6 +79,8 @@ pub struct War3App {
 
     /// Lobby RTT 測量（ms），由 discovery 更新
     latency_ms: Arc<AtomicU64>,
+    /// Tunnel RTT 測量（ms），遊戲中由 tunnel bridge 更新，0 表示無 tunnel
+    tunnel_latency_ms: Arc<AtomicU64>,
 
     /// P2P 直連：對方 IP（從 StunInfo 接收）
     peer_addr: Option<std::net::IpAddr>,
@@ -128,6 +130,7 @@ impl War3App {
             injection_handle: None,
             tunnel_handle: None,
             latency_ms,
+            tunnel_latency_ms: Arc::new(AtomicU64::new(0)),
             peer_addr: None,
             transport: None,
         };
@@ -174,8 +177,11 @@ impl War3App {
         let event_tx = self.tunnel_event_tx.clone();
         let peer_addr = self.peer_addr.take();
 
+        self.tunnel_latency_ms.store(0, Ordering::Relaxed);
+        let tunnel_lat = self.tunnel_latency_ms.clone();
         let handle = self.rt_handle.spawn(async move {
-            tunnel::run_joiner_tunnel(server_url, tunnel_token, peer_addr, event_tx).await;
+            tunnel::run_joiner_tunnel(server_url, tunnel_token, peer_addr, event_tx, tunnel_lat)
+                .await;
         });
         self.tunnel_handle = Some(handle);
 
@@ -191,8 +197,11 @@ impl War3App {
         let event_tx = self.tunnel_event_tx.clone();
         let peer_addr = self.peer_addr.take();
 
+        self.tunnel_latency_ms.store(0, Ordering::Relaxed);
+        let tunnel_lat = self.tunnel_latency_ms.clone();
         let handle = self.rt_handle.spawn(async move {
-            tunnel::run_host_tunnel(server_url, tunnel_token, peer_addr, event_tx).await;
+            tunnel::run_host_tunnel(server_url, tunnel_token, peer_addr, event_tx, tunnel_lat)
+                .await;
         });
         self.tunnel_handle = Some(handle);
     }
@@ -286,6 +295,7 @@ impl War3App {
                     }
                     self.tunnel_handle = None;
                     self.transport = None;
+                    self.tunnel_latency_ms.store(0, Ordering::Relaxed);
                     self.log_panel.info("Tunnel 連線結束");
                 }
                 TunnelEvent::Finished { error: Some(e) } => {
@@ -294,6 +304,7 @@ impl War3App {
                     }
                     self.tunnel_handle = None;
                     self.transport = None;
+                    self.tunnel_latency_ms.store(0, Ordering::Relaxed);
                     self.log_panel.error(format!("Tunnel 錯誤: {e}"));
                 }
                 TunnelEvent::GameinfoCaptured {
@@ -302,12 +313,18 @@ impl War3App {
                     max_players,
                     gameinfo,
                 } => {
-                    let _ = self.cmd_tx.send(ClientMessage::CreateRoom {
-                        room_name,
-                        map_name,
-                        max_players,
-                        gameinfo,
-                    });
+                    if gameinfo.is_empty() {
+                        self.pending_action = None;
+                        self.log_panel
+                            .error("請先在 War3 中建立遊戲，再回來建立房間");
+                    } else {
+                        let _ = self.cmd_tx.send(ClientMessage::CreateRoom {
+                            room_name,
+                            map_name,
+                            max_players,
+                            gameinfo,
+                        });
+                    }
                 }
             }
         }
@@ -566,7 +583,13 @@ impl eframe::App for War3App {
                 } else {
                     None
                 };
-                let latency = self.latency_ms.load(Ordering::Relaxed);
+                // 遊戲中優先顯示 tunnel 延遲，否則顯示 lobby 延遲
+                let tunnel_lat = self.tunnel_latency_ms.load(Ordering::Relaxed);
+                let latency = if tunnel_lat > 0 {
+                    tunnel_lat
+                } else {
+                    self.latency_ms.load(Ordering::Relaxed)
+                };
                 let action = self.lobby.show(
                     ui,
                     &self.rooms,
