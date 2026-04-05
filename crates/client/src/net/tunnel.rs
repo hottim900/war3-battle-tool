@@ -93,10 +93,7 @@ async fn background_quic_joiner(
 }
 
 /// 背景 QUIC 連線 + swap handshake（host 端）
-async fn background_quic_host(
-    tunnel_token: String,
-    swap_tx: mpsc::Sender<QuicSwapReady>,
-) {
+async fn background_quic_host(tunnel_token: String, swap_tx: mpsc::Sender<QuicSwapReady>) {
     let token_short = tunnel_token.get(..8).unwrap_or(&tunnel_token);
 
     match quic::accept_direct(&tunnel_token).await {
@@ -443,9 +440,7 @@ async fn bridge_tcp_ws_with_swap(
     }
 
     // Flush buffered TCP data → QUIC
-    if !tcp_outbound_buffer.is_empty()
-        && quic_send.write_all(&tcp_outbound_buffer).await.is_err()
-    {
+    if !tcp_outbound_buffer.is_empty() && quic_send.write_all(&tcp_outbound_buffer).await.is_err() {
         warn!(%token_short, "QUIC 寫入 TCP buffer 失敗");
         return Ok(());
     }
