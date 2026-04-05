@@ -17,7 +17,6 @@ use crate::ui::setup_wizard::SetupWizard;
 enum Tab {
     Lobby,
     Settings,
-    Log,
 }
 
 #[derive(Debug, Clone)]
@@ -561,13 +560,30 @@ impl eframe::App for War3App {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, Tab::Lobby, "大廳");
                 ui.selectable_value(&mut self.current_tab, Tab::Settings, "設定");
-                ui.selectable_value(&mut self.current_tab, Tab::Log, "日誌");
             });
         });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             self.show_status_bar(ui);
         });
+
+        // 日誌面板固定在底部（大廳和設定頁都可見）
+        egui::TopBottomPanel::bottom("log_panel")
+            .resizable(true)
+            .default_height(120.0)
+            .min_height(60.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("日誌");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("清除").clicked() {
+                            self.log_panel.clear();
+                        }
+                    });
+                });
+                ui.separator();
+                self.log_panel.show(ui);
+            });
 
         let is_hosting = self.is_hosting();
         egui::CentralPanel::default().show(ctx, |ui| match self.current_tab {
@@ -640,9 +656,6 @@ impl eframe::App for War3App {
             }
             Tab::Settings => {
                 crate::ui::settings::show(ui, &mut self.config, &mut self.config_changed);
-            }
-            Tab::Log => {
-                self.log_panel.show(ui);
             }
         });
 

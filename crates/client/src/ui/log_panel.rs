@@ -52,10 +52,11 @@ impl LogPanel {
         self.add(LogLevel::Error, message);
     }
 
-    pub fn show(&self, ui: &mut egui::Ui) {
-        ui.heading("日誌");
-        ui.separator();
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 
+    pub fn show(&self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_salt("log_scroll")
             .stick_to_bottom(true)
