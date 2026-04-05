@@ -8,7 +8,7 @@ use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo, ServerMessage
 
 use crate::net::discovery::NetEvent;
 use crate::net::packet::{RawUdpInjector, check_room};
-use crate::net::tunnel::{self, TunnelEvent};
+use crate::net::tunnel::{self, Transport, TunnelEvent};
 use crate::ui::lobby::{LobbyAction, LobbyPanel};
 use crate::ui::log_panel::LogPanel;
 use crate::ui::setup_wizard::SetupWizard;
@@ -80,6 +80,8 @@ pub struct War3App {
 
     /// P2P 直連：對方 IP（從 StunInfo 接收）
     peer_addr: Option<std::net::IpAddr>,
+    /// 目前遊戲傳輸路徑（relay 或 direct）
+    transport: Option<Transport>,
 }
 
 impl War3App {
@@ -124,6 +126,7 @@ impl War3App {
             injection_handle: None,
             latency_ms,
             peer_addr: None,
+            transport: None,
         };
 
         app.log_panel.info("War3 Battle Tool 啟動");
@@ -250,16 +253,25 @@ impl War3App {
                     self.log_panel.info("Tunnel proxy 就緒");
                     self.start_gameinfo_injection();
                 }
+                TunnelEvent::TransportSelected(t) => {
+                    self.transport = Some(t);
+                    match t {
+                        Transport::Direct => self.log_panel.info("傳輸: P2P 直連"),
+                        Transport::Relay => self.log_panel.info("傳輸: Relay 中繼"),
+                    }
+                }
                 TunnelEvent::Finished { error: None } => {
                     if let Some(h) = self.injection_handle.take() {
                         h.abort();
                     }
+                    self.transport = None;
                     self.log_panel.info("Tunnel 連線結束");
                 }
                 TunnelEvent::Finished { error: Some(e) } => {
                     if let Some(h) = self.injection_handle.take() {
                         h.abort();
                     }
+                    self.transport = None;
                     self.log_panel.error(format!("Tunnel 錯誤: {e}"));
                 }
                 TunnelEvent::GameinfoCaptured {
@@ -541,6 +553,7 @@ impl eframe::App for War3App {
                     is_hosting,
                     &self.cmd_tx,
                     latency,
+                    self.transport,
                 );
                 match action {
                     LobbyAction::None => {}

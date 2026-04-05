@@ -17,11 +17,20 @@ const JOINER_BIND_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
 /// Host War3 監聽的位址
 const HOST_WAR3_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, WAR3_PORT);
 
+/// 傳輸路徑
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Transport {
+    Relay,
+    Direct,
+}
+
 /// Tunnel 連線結果
 #[derive(Debug)]
 pub enum TunnelEvent {
     /// TCP proxy ready，可以開始 inject GAMEINFO
     ProxyReady,
+    /// 傳輸路徑已確定
+    TransportSelected(Transport),
     /// Tunnel 已結束（正常或錯誤）
     Finished { error: Option<String> },
     /// GAMEINFO 擷取完成，可以送 CreateRoom
@@ -64,6 +73,7 @@ pub async fn run_joiner_tunnel(
         match quic::connect_direct(addr, &tunnel_token).await {
             Ok((quic_send, quic_recv)) => {
                 info!(%token_short, "QUIC 直連成功，等待 War3 TCP");
+                let _ = event_tx.send(TunnelEvent::TransportSelected(Transport::Direct));
                 let tcp_stream = match accept_war3_tcp(&tcp_listener, &token_short).await {
                     Some(s) => s,
                     None => {
@@ -86,7 +96,8 @@ pub async fn run_joiner_tunnel(
         }
     }
 
-    // 3. Fallback: WS relay
+    // Fallback: WS relay
+    let _ = event_tx.send(TunnelEvent::TransportSelected(Transport::Relay));
     let base_url = server_url.strip_suffix("/ws").unwrap_or(&server_url);
     let ws_url = format!("{base_url}/tunnel?token={tunnel_token}&role=join");
 
@@ -135,6 +146,7 @@ pub async fn run_host_tunnel(
         match quic::accept_direct(&tunnel_token).await {
             Ok((quic_send, quic_recv)) => {
                 info!(%token_short, "QUIC 直連成功，連接 War3 TCP");
+                let _ = event_tx.send(TunnelEvent::TransportSelected(Transport::Direct));
                 let tcp_stream = match connect_war3_tcp(&token_short).await {
                     Some(s) => s,
                     None => {
@@ -151,12 +163,13 @@ pub async fn run_host_tunnel(
                 return;
             }
             Err(e) => {
-                info!(%token_short, %e, "QUIC host 監聽失敗，fallback WS relay");
+                info!(%token_short, %e, "QUIC host 監聯失敗，fallback WS relay");
             }
         }
     } // peer_addr.is_some()
 
     // 2. Fallback: WS relay
+    let _ = event_tx.send(TunnelEvent::TransportSelected(Transport::Relay));
     let base_url = server_url.strip_suffix("/ws").unwrap_or(&server_url);
     let ws_url = format!("{base_url}/tunnel?token={tunnel_token}&role=host");
 

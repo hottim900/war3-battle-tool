@@ -1,7 +1,7 @@
 use eframe::egui;
-use war3_protocol::messages::{PlayerInfo, RoomInfo};
+use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo};
 
-use war3_protocol::messages::ClientMessage;
+use crate::net::tunnel::Transport;
 
 /// Action returned from `LobbyPanel::show` so the app can track pending state.
 pub enum LobbyAction {
@@ -45,6 +45,7 @@ impl LobbyPanel {
         is_hosting: bool,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
         latency_ms: u64,
+        transport: Option<Transport>,
     ) -> LobbyAction {
         let mut action = LobbyAction::None;
 
@@ -53,6 +54,11 @@ impl LobbyPanel {
             ui.heading("房間列表");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if latency_ms > 0 {
+                    let suffix = match transport {
+                        Some(Transport::Direct) => " (direct)",
+                        Some(Transport::Relay) => " (relay)",
+                        None => "",
+                    };
                     let color = if latency_ms < 30 {
                         egui::Color32::from_rgb(100, 200, 100) // 綠
                     } else if latency_ms < 80 {
@@ -60,7 +66,7 @@ impl LobbyPanel {
                     } else {
                         egui::Color32::from_rgb(255, 100, 100) // 紅
                     };
-                    ui.colored_label(color, format!("延遲: {latency_ms}ms"));
+                    ui.colored_label(color, format!("延遲: {latency_ms}ms{suffix}"));
                 }
             });
         });
