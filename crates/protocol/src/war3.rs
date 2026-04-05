@@ -98,13 +98,14 @@ fn decode_stat_string(data: &[u8], start: usize) -> Option<String> {
 
     // War3 stat string decoding:
     // 1 mask byte + 最多 7 data bytes 為一組
+    // mask bits 1-7 對應 7 個 data bytes（bit 0 未使用）
     // bit=1 → byte 直接使用, bit=0 → byte - 1
     let mut decoded = Vec::new();
     let mut i = 0;
     while i < encoded.len() {
         let mask = encoded[i];
         i += 1;
-        for bit in 0..7 {
+        for bit in 1..8 {
             if i >= encoded.len() {
                 break;
             }
