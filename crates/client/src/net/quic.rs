@@ -34,8 +34,14 @@ pub async fn accept_direct(tunnel_token: &str) -> Result<(quinn::SendStream, qui
     transport.max_concurrent_uni_streams(0u32.into());
     transport.max_concurrent_bidi_streams(1u32.into());
 
-    let bind_addr: SocketAddr = ([0, 0, 0, 0], QUIC_PORT).into();
-    let endpoint = quinn::Endpoint::server(config, bind_addr).context("QUIC endpoint bind 失敗")?;
+    // 嘗試 dual-stack (IPv6 any)，失敗則 fallback IPv4 any
+    let bind_addr: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 0], QUIC_PORT).into();
+    let endpoint = quinn::Endpoint::server(config.clone(), bind_addr)
+        .or_else(|_| {
+            let v4: SocketAddr = ([0, 0, 0, 0], QUIC_PORT).into();
+            quinn::Endpoint::server(config, v4)
+        })
+        .context("QUIC endpoint bind 失敗")?;
     info!(%bind_addr, "QUIC host 等待直連");
 
     let incoming = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.accept())
@@ -69,7 +75,12 @@ pub async fn connect_direct(
 
     let quic_crypto = QuicClientConfig::try_from(crypto)
         .map_err(|e| anyhow::anyhow!("QUIC client config: {e}"))?;
-    let mut endpoint = quinn::Endpoint::client(([0, 0, 0, 0], 0).into())?;
+    let bind_addr: SocketAddr = if peer_ip.is_ipv6() {
+        ([0u8; 16], 0).into()
+    } else {
+        ([0, 0, 0, 0], 0).into()
+    };
+    let mut endpoint = quinn::Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic_crypto)));
 
     let target = SocketAddr::new(peer_ip, QUIC_PORT);
