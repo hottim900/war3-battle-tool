@@ -174,8 +174,9 @@ impl War3App {
         let event_tx = self.tunnel_event_tx.clone();
         let peer_addr = self.peer_addr.take();
 
+        let latency = self.latency_ms.clone();
         let handle = self.rt_handle.spawn(async move {
-            tunnel::run_joiner_tunnel(server_url, tunnel_token, peer_addr, event_tx).await;
+            tunnel::run_joiner_tunnel(server_url, tunnel_token, peer_addr, event_tx, latency).await;
         });
         self.tunnel_handle = Some(handle);
 
@@ -191,8 +192,9 @@ impl War3App {
         let event_tx = self.tunnel_event_tx.clone();
         let peer_addr = self.peer_addr.take();
 
+        let latency = self.latency_ms.clone();
         let handle = self.rt_handle.spawn(async move {
-            tunnel::run_host_tunnel(server_url, tunnel_token, peer_addr, event_tx).await;
+            tunnel::run_host_tunnel(server_url, tunnel_token, peer_addr, event_tx, latency).await;
         });
         self.tunnel_handle = Some(handle);
     }
@@ -302,12 +304,18 @@ impl War3App {
                     max_players,
                     gameinfo,
                 } => {
-                    let _ = self.cmd_tx.send(ClientMessage::CreateRoom {
-                        room_name,
-                        map_name,
-                        max_players,
-                        gameinfo,
-                    });
+                    if gameinfo.is_empty() {
+                        self.pending_action = None;
+                        self.log_panel
+                            .error("請先在 War3 中建立遊戲，再回來建立房間");
+                    } else {
+                        let _ = self.cmd_tx.send(ClientMessage::CreateRoom {
+                            room_name,
+                            map_name,
+                            max_players,
+                            gameinfo,
+                        });
+                    }
                 }
             }
         }

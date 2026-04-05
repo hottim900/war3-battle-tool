@@ -1,4 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -20,6 +22,8 @@ const JOINER_BIND_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
 const HOST_WAR3_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, WAR3_PORT);
 /// WS relay drain timeout（swap 時等待殘留 WS 資料的最長時間）
 const WS_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+/// Tunnel 延遲測量間隔
+const TUNNEL_PING_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 傳輸路徑
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -128,6 +132,7 @@ pub async fn run_joiner_tunnel(
     tunnel_token: String,
     peer_addr: Option<IpAddr>,
     event_tx: mpsc::UnboundedSender<TunnelEvent>,
+    latency_ms: Arc<AtomicU64>,
 ) {
     let token_short = tunnel_token.get(..8).unwrap_or(&tunnel_token).to_string();
 
@@ -185,8 +190,15 @@ pub async fn run_joiner_tunnel(
     }
 
     // 4. WS relay bridge（支援 mid-game swap 到 QUIC）
-    let result =
-        bridge_tcp_ws_with_swap(tcp_stream, ws_stream, swap_rx, &event_tx, &token_short).await;
+    let result = bridge_tcp_ws_with_swap(
+        tcp_stream,
+        ws_stream,
+        swap_rx,
+        &event_tx,
+        &latency_ms,
+        &token_short,
+    )
+    .await;
     let _ = event_tx.send(TunnelEvent::Finished {
         error: result.err(),
     });
@@ -198,6 +210,7 @@ pub async fn run_host_tunnel(
     tunnel_token: String,
     peer_addr: Option<IpAddr>,
     event_tx: mpsc::UnboundedSender<TunnelEvent>,
+    latency_ms: Arc<AtomicU64>,
 ) {
     let token_short = tunnel_token.get(..8).unwrap_or(&tunnel_token).to_string();
 
@@ -240,8 +253,15 @@ pub async fn run_host_tunnel(
     }
 
     // 3. WS relay bridge（支援 mid-game swap 到 QUIC）
-    let result =
-        bridge_tcp_ws_with_swap(tcp_stream, ws_stream, swap_rx, &event_tx, &token_short).await;
+    let result = bridge_tcp_ws_with_swap(
+        tcp_stream,
+        ws_stream,
+        swap_rx,
+        &event_tx,
+        &latency_ms,
+        &token_short,
+    )
+    .await;
     let _ = event_tx.send(TunnelEvent::Finished {
         error: result.err(),
     });
@@ -293,6 +313,7 @@ async fn bridge_tcp_ws_with_swap(
     >,
     mut swap_rx: mpsc::Receiver<QuicSwapReady>,
     event_tx: &mpsc::UnboundedSender<TunnelEvent>,
+    latency_ms: &AtomicU64,
     token_short: &str,
 ) -> Result<(), String> {
     tcp_stream
@@ -305,6 +326,10 @@ async fn bridge_tcp_ws_with_swap(
     let mut total_tcp_to_ws: u64 = 0;
     let mut total_ws_to_tcp: u64 = 0;
     let mut buf = [0u8; RELAY_BUF_SIZE];
+
+    // WS Ping 延遲測量
+    let mut ping_timer = tokio::time::interval(TUNNEL_PING_INTERVAL);
+    let mut ping_sent_at: Option<tokio::time::Instant> = None;
 
     // Phase 1: WS relay（可被 swap 中斷）
     let swap = loop {
@@ -347,6 +372,13 @@ async fn bridge_tcp_ws_with_swap(
                     Some(Ok(Message::Ping(data))) => {
                         let _ = ws_sender.send(Message::Pong(data)).await;
                     }
+                    Some(Ok(Message::Pong(_))) => {
+                        // WS Pong 回來了，計算 RTT
+                        if let Some(sent) = ping_sent_at.take() {
+                            let rtt = sent.elapsed().as_millis() as u64;
+                            latency_ms.store(rtt, Ordering::Relaxed);
+                        }
+                    }
                     Some(Err(e)) => {
                         warn!(%token_short, %e, "WS 接收錯誤");
                         break None;
@@ -360,6 +392,11 @@ async fn bridge_tcp_ws_with_swap(
                     break Some(quic_ready);
                 }
                 // channel closed → 背景 QUIC 失敗，繼續 WS relay
+            }
+            // 定期 WS Ping 測量延遲
+            _ = ping_timer.tick() => {
+                ping_sent_at = Some(tokio::time::Instant::now());
+                let _ = ws_sender.send(Message::Ping(Vec::new().into())).await;
             }
         }
     };
