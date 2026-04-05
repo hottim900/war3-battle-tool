@@ -84,7 +84,10 @@ fn assert_sequences_complete(received: &[u32], total: u32) {
         );
     }
     for (i, &seq) in received.iter().enumerate() {
-        assert_eq!(seq, i as u32, "順序錯誤 @ index {i}: expected {i}, got {seq}");
+        assert_eq!(
+            seq, i as u32,
+            "順序錯誤 @ index {i}: expected {i}, got {seq}"
+        );
     }
 }
 
@@ -180,7 +183,10 @@ async fn test_mid_game_swap_zero_data_loss() {
     let bridge_handle = tokio::spawn(swappable_bridge(
         tcp_bridge_read,
         tcp_bridge_write,
-        BackendHandle { reader: backend_a_read, writer: backend_a_write },
+        BackendHandle {
+            reader: backend_a_read,
+            writer: backend_a_write,
+        },
         swap_rx,
     ));
 
@@ -203,7 +209,10 @@ async fn test_mid_game_swap_zero_data_loss() {
                 if let Some(new_backend) = pending_backend.take() {
                     let (done_tx, done_rx) = oneshot::channel();
                     swap_tx
-                        .send(SwapCommand { new_backend, done_tx })
+                        .send(SwapCommand {
+                            new_backend,
+                            done_tx,
+                        })
                         .await
                         .unwrap();
                     done_rx.await.unwrap();
@@ -254,7 +263,10 @@ async fn test_swap_under_heavy_load() {
     let bridge_handle = tokio::spawn(swappable_bridge(
         tcp_bridge_read,
         tcp_bridge_write,
-        BackendHandle { reader: ba_read, writer: ba_write },
+        BackendHandle {
+            reader: ba_read,
+            writer: ba_write,
+        },
         swap_rx,
     ));
 
@@ -269,8 +281,14 @@ async fn test_swap_under_heavy_load() {
 
     let sender = tokio::spawn(async move {
         let backends = vec![
-            BackendHandle { reader: bb_read, writer: bb_write },
-            BackendHandle { reader: bc_read, writer: bc_write },
+            BackendHandle {
+                reader: bb_read,
+                writer: bb_write,
+            },
+            BackendHandle {
+                reader: bc_read,
+                writer: bc_write,
+            },
         ];
         let mut backend_iter = backends.into_iter();
 
@@ -278,7 +296,13 @@ async fn test_swap_under_heavy_load() {
             if swap_points.contains(&seq) {
                 if let Some(new_backend) = backend_iter.next() {
                     let (done_tx, done_rx) = oneshot::channel();
-                    swap_tx.send(SwapCommand { new_backend, done_tx }).await.unwrap();
+                    swap_tx
+                        .send(SwapCommand {
+                            new_backend,
+                            done_tx,
+                        })
+                        .await
+                        .unwrap();
                     done_rx.await.unwrap();
                 }
             }
