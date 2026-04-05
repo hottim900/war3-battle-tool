@@ -74,6 +74,8 @@ pub struct War3App {
     pending_gameinfo: Option<Vec<u8>>,
     /// Handle to the GAMEINFO injection task (for cancellation)
     injection_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Handle to the tunnel task (for cancellation on re-join or cleanup)
+    tunnel_handle: Option<tokio::task::JoinHandle<()>>,
 
     /// Lobby RTT 測量（ms），由 discovery 更新
     latency_ms: Arc<AtomicU64>,
@@ -124,6 +126,7 @@ impl War3App {
             pending_action: None,
             pending_gameinfo: None,
             injection_handle: None,
+            tunnel_handle: None,
             latency_ms,
             peer_addr: None,
             transport: None,
@@ -156,15 +159,25 @@ impl War3App {
         });
     }
 
+    /// 取消舊的 tunnel task（避免 ghost socket）
+    fn abort_tunnel(&mut self) {
+        if let Some(h) = self.tunnel_handle.take() {
+            h.abort();
+        }
+    }
+
     /// 啟動 joiner 端 tunnel 和 GAMEINFO 注入
     fn start_joiner_tunnel(&mut self, tunnel_token: String, gameinfo: Vec<u8>) {
+        self.abort_tunnel();
+
         let server_url = self.server_url.clone();
         let event_tx = self.tunnel_event_tx.clone();
         let peer_addr = self.peer_addr.take();
 
-        self.rt_handle.spawn(async move {
+        let handle = self.rt_handle.spawn(async move {
             tunnel::run_joiner_tunnel(server_url, tunnel_token, peer_addr, event_tx).await;
         });
+        self.tunnel_handle = Some(handle);
 
         // 存 GAMEINFO，等 ProxyReady 後開始注入
         self.pending_gameinfo = Some(gameinfo);
@@ -172,13 +185,16 @@ impl War3App {
 
     /// 啟動 host 端 tunnel
     fn start_host_tunnel(&mut self, tunnel_token: String) {
+        self.abort_tunnel();
+
         let server_url = self.server_url.clone();
         let event_tx = self.tunnel_event_tx.clone();
         let peer_addr = self.peer_addr.take();
 
-        self.rt_handle.spawn(async move {
+        let handle = self.rt_handle.spawn(async move {
             tunnel::run_host_tunnel(server_url, tunnel_token, peer_addr, event_tx).await;
         });
+        self.tunnel_handle = Some(handle);
     }
 
     /// 開始 GAMEINFO 注入循環（ProxyReady 時呼叫）
@@ -264,6 +280,7 @@ impl War3App {
                     if let Some(h) = self.injection_handle.take() {
                         h.abort();
                     }
+                    self.tunnel_handle = None;
                     self.transport = None;
                     self.log_panel.info("Tunnel 連線結束");
                 }
@@ -271,6 +288,7 @@ impl War3App {
                     if let Some(h) = self.injection_handle.take() {
                         h.abort();
                     }
+                    self.tunnel_handle = None;
                     self.transport = None;
                     self.log_panel.error(format!("Tunnel 錯誤: {e}"));
                 }
@@ -597,6 +615,17 @@ impl eframe::App for War3App {
         });
 
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
+impl Drop for War3App {
+    fn drop(&mut self) {
+        if let Some(h) = self.tunnel_handle.take() {
+            h.abort();
+        }
+        if let Some(h) = self.injection_handle.take() {
+            h.abort();
+        }
     }
 }
 

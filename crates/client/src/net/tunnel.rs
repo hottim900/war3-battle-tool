@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -203,18 +204,22 @@ pub async fn run_host_tunnel(
     });
 }
 
-/// 等待 War3 TCP 連入（joiner 端）
+/// 等待 War3 TCP 連入（joiner 端），120 秒 timeout 避免永久佔用 port
 async fn accept_war3_tcp(
     listener: &tokio::net::TcpListener,
     token_short: &str,
 ) -> Option<TcpStream> {
-    match listener.accept().await {
-        Ok((stream, peer)) => {
+    match tokio::time::timeout(Duration::from_secs(120), listener.accept()).await {
+        Ok(Ok((stream, peer))) => {
             info!(%token_short, %peer, "War3 TCP 連入");
             Some(stream)
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             error!(%token_short, %e, "TCP accept 失敗");
+            None
+        }
+        Err(_) => {
+            warn!(%token_short, "TCP accept 逾時（120s），釋放 port");
             None
         }
     }
