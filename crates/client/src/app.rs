@@ -605,15 +605,10 @@ impl eframe::App for War3App {
                     LobbyAction::JoinRoom { room_name } => {
                         self.pending_action = Some(PendingAction::Joining { room_name });
                     }
-                    LobbyAction::CreateRoom {
-                        room_name,
-                        map_name,
-                        max_players,
-                    } => {
-                        // 在背景擷取 GAMEINFO（blocking UDP call），避免凍結 UI
+                    LobbyAction::CreateRoom { max_players } => {
+                        // 在背景擷取 GAMEINFO 並自動偵測房間名/地圖名
                         let version = self.config.war3_version;
                         let event_tx = self.tunnel_event_tx.clone();
-                        let rn = room_name.clone();
                         self.rt_handle.spawn(async move {
                             let gameinfo = tokio::task::spawn_blocking(move || {
                                 check_room(std::net::Ipv4Addr::LOCALHOST, version)
@@ -622,14 +617,24 @@ impl eframe::App for War3App {
                             .await
                             .unwrap_or_default();
 
+                            // 從 GAMEINFO 自動偵測房間名和地圖名
+                            let fields = war3_protocol::war3::parse_gameinfo(&gameinfo);
+                            let room_name = fields
+                                .as_ref()
+                                .map(|f| f.game_name.clone())
+                                .unwrap_or_default();
+                            let map_name = fields.and_then(|f| f.map_path).unwrap_or_default();
+
                             let _ = event_tx.send(TunnelEvent::GameinfoCaptured {
-                                room_name: rn,
+                                room_name,
                                 map_name,
                                 max_players,
                                 gameinfo,
                             });
                         });
-                        self.pending_action = Some(PendingAction::CreatingRoom { room_name });
+                        self.pending_action = Some(PendingAction::CreatingRoom {
+                            room_name: "偵測中...".to_string(),
+                        });
                     }
                 }
             }

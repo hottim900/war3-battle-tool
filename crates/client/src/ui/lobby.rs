@@ -6,21 +6,12 @@ use crate::net::tunnel::Transport;
 /// Action returned from `LobbyPanel::show` so the app can track pending state.
 pub enum LobbyAction {
     None,
-    JoinRoom {
-        room_name: String,
-    },
-    CreateRoom {
-        room_name: String,
-        map_name: String,
-        max_players: u8,
-    },
+    JoinRoom { room_name: String },
+    CreateRoom { max_players: u8 },
 }
 
 /// 大廳畫面：上方房間列表，下方線上玩家
 pub struct LobbyPanel {
-    // 建房表單
-    pub create_room_name: String,
-    pub create_map_name: String,
     pub create_max_players: u8,
     pub show_create_dialog: bool,
 }
@@ -28,8 +19,6 @@ pub struct LobbyPanel {
 impl LobbyPanel {
     pub fn new() -> Self {
         Self {
-            create_room_name: String::new(),
-            create_map_name: String::new(),
             create_max_players: 4,
             show_create_dialog: false,
         }
@@ -131,7 +120,7 @@ impl LobbyPanel {
             }
         });
 
-        // 建房對話框
+        // 建房對話框（房間名和地圖名從 War3 自動偵測）
         if self.show_create_dialog
             && let Some(create_action) = self.show_create_room_dialog(ui)
         {
@@ -170,46 +159,28 @@ impl LobbyPanel {
         action
     }
 
-    /// Shows the create-room dialog. Returns the action when user confirms.
     fn show_create_room_dialog(&mut self, ui: &mut egui::Ui) -> Option<LobbyAction> {
         let mut result: Option<LobbyAction> = None;
 
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.heading("建立房間");
+            ui.add_space(4.0);
+            ui.label("請先在 War3 建立遊戲，再按建立。");
+            ui.label("房間名稱和地圖名稱會自動偵測。");
             ui.add_space(8.0);
 
-            egui::Grid::new("create_room_grid")
-                .num_columns(2)
-                .spacing([10.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("房間名稱：");
-                    ui.text_edit_singleline(&mut self.create_room_name);
-                    ui.end_row();
-
-                    ui.label("地圖名稱：");
-                    ui.text_edit_singleline(&mut self.create_map_name);
-                    ui.end_row();
-
-                    ui.label("最大玩家數：");
-                    ui.add(egui::Slider::new(&mut self.create_max_players, 2..=12));
-                    ui.end_row();
-                });
+            ui.horizontal(|ui| {
+                ui.label("最大玩家數：");
+                ui.add(egui::Slider::new(&mut self.create_max_players, 2..=12));
+            });
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let can_create = !self.create_room_name.trim().is_empty();
-                if ui
-                    .add_enabled(can_create, egui::Button::new("建立"))
-                    .clicked()
-                {
+                if ui.button("建立").clicked() {
                     result = Some(LobbyAction::CreateRoom {
-                        room_name: self.create_room_name.clone(),
-                        map_name: self.create_map_name.clone(),
                         max_players: self.create_max_players,
                     });
                     self.show_create_dialog = false;
-                    self.create_room_name.clear();
-                    self.create_map_name.clear();
                 }
                 if ui.button("取消").clicked() {
                     self.show_create_dialog = false;
