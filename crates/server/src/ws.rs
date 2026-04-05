@@ -320,6 +320,15 @@ pub async fn handle_socket(
                         .register_token(tunnel_token.clone(), host_ip, client_ip)
                         .await;
 
+                    // P2P 直連：先送 StunInfo，再送 JoinResult/PlayerJoined
+                    // 確保 client 啟動 tunnel 時已知道 peer_addr
+                    let _ = tx.try_send(ServerMessage::StunInfo {
+                        peer_addr: host_ip.to_string(),
+                    });
+                    let _ = host.tx.try_send(ServerMessage::StunInfo {
+                        peer_addr: client_ip.to_string(),
+                    });
+
                     let _ = tx.try_send(ServerMessage::JoinResult {
                         success: true,
                         room_id: Some(room_id.clone()),
@@ -336,14 +345,6 @@ pub async fn handle_socket(
                     let _ = host.tx.try_send(ServerMessage::PlayerJoined {
                         nickname: joiner_nickname,
                         tunnel_token: tunnel_token.clone(),
-                    });
-
-                    // P2P 直連：送 StunInfo 給雙方（unicast，不走 broadcast）
-                    let _ = tx.try_send(ServerMessage::StunInfo {
-                        peer_addr: host_ip.to_string(),
-                    });
-                    let _ = host.tx.try_send(ServerMessage::StunInfo {
-                        peer_addr: client_ip.to_string(),
                     });
 
                     drop(players);
