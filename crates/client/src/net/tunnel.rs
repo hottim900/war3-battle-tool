@@ -68,14 +68,16 @@ async fn background_quic_joiner(
 
     match quic::connect_direct(peer_ip, &tunnel_token).await {
         Ok((mut send, mut recv)) => {
-            // Joiner 發起 swap handshake
-            if send.write_all(&[SWAP_READY]).await.is_err() {
-                warn!(%token_short, "QUIC swap handshake 寫入失敗");
-                return;
-            }
-            let mut buf = [0u8; 1];
-            match tokio::time::timeout(Duration::from_secs(3), recv.read_exact(&mut buf)).await {
-                Ok(Ok(())) if buf[0] == SWAP_ACK => {
+            // Joiner 發起 swap handshake（整個流程含 timeout）
+            let handshake = async {
+                send.write_all(&[SWAP_READY]).await?;
+                let mut buf = [0u8; 1];
+                recv.read_exact(&mut buf).await?;
+                anyhow::ensure!(buf[0] == SWAP_ACK, "unexpected swap response");
+                Ok::<_, anyhow::Error>(())
+            };
+            match tokio::time::timeout(Duration::from_secs(3), handshake).await {
+                Ok(Ok(())) => {
                     info!(%token_short, "QUIC swap handshake 完成");
                     let _ = swap_tx.send(QuicSwapReady { send, recv }).await;
                 }
@@ -99,14 +101,16 @@ async fn background_quic_host(
 
     match quic::accept_direct(&tunnel_token).await {
         Ok((mut send, mut recv)) => {
-            // Host 等待 joiner 的 SWAP_READY
-            let mut buf = [0u8; 1];
-            match tokio::time::timeout(Duration::from_secs(3), recv.read_exact(&mut buf)).await {
-                Ok(Ok(())) if buf[0] == SWAP_READY => {
-                    if send.write_all(&[SWAP_ACK]).await.is_err() {
-                        warn!(%token_short, "QUIC swap ACK 寫入失敗");
-                        return;
-                    }
+            // Host 等待 joiner 的 swap handshake（整個流程含 timeout）
+            let handshake = async {
+                let mut buf = [0u8; 1];
+                recv.read_exact(&mut buf).await?;
+                anyhow::ensure!(buf[0] == SWAP_READY, "unexpected swap signal");
+                send.write_all(&[SWAP_ACK]).await?;
+                Ok::<_, anyhow::Error>(())
+            };
+            match tokio::time::timeout(Duration::from_secs(3), handshake).await {
+                Ok(Ok(())) => {
                     info!(%token_short, "QUIC swap handshake 完成");
                     let _ = swap_tx.send(QuicSwapReady { send, recv }).await;
                 }
@@ -381,16 +385,16 @@ async fn bridge_tcp_ws_with_swap(
 
     info!(%token_short, "開始 mid-game swap: WS relay → QUIC direct");
 
-    // 2a. 停止寫入 WS，drain WS 殘留資料（同時 buffer QUIC 資料確保順序）
-    let _ = ws_sender.send(Message::Close(None)).await;
-
+    // Drain WS 殘留資料，同時 buffer QUIC 和 TCP 資料確保順序正確
+    // 不送 WS Close — 讓 drain 自然結束，避免 server 提前回 Close 中斷 drain
     let mut quic_buffer: Vec<u8> = Vec::new();
-    let mut quic_buf = [0u8; RELAY_BUF_SIZE];
+    let mut tcp_outbound_buffer: Vec<u8> = Vec::new();
+    let mut drain_quic_buf = [0u8; RELAY_BUF_SIZE];
+    let mut drain_tcp_buf = [0u8; RELAY_BUF_SIZE];
     let drain_deadline = tokio::time::Instant::now() + WS_DRAIN_TIMEOUT;
 
     loop {
         tokio::select! {
-            // Drain WS 殘留
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
@@ -399,13 +403,12 @@ async fn bridge_tcp_ws_with_swap(
                             return Ok(());
                         }
                     }
-                    _ => break, // WS closed or error → drain 完成
+                    _ => break,
                 }
             }
-            // Buffer 來自 QUIC 的資料（不直接寫 TCP，等 WS drain 完）
-            result = quic_recv.read(&mut quic_buf) => {
+            result = quic_recv.read(&mut drain_quic_buf) => {
                 match result {
-                    Ok(Some(n)) => quic_buffer.extend_from_slice(&quic_buf[..n]),
+                    Ok(Some(n)) => quic_buffer.extend_from_slice(&drain_quic_buf[..n]),
                     Ok(None) => {
                         warn!(%token_short, "QUIC stream 在 drain 期間關閉");
                         return Ok(());
@@ -416,7 +419,13 @@ async fn bridge_tcp_ws_with_swap(
                     }
                 }
             }
-            // Drain timeout
+            result = tcp_read.read(&mut drain_tcp_buf) => {
+                match result {
+                    Ok(0) => break,
+                    Ok(n) => tcp_outbound_buffer.extend_from_slice(&drain_tcp_buf[..n]),
+                    Err(_) => break,
+                }
+            }
             _ = tokio::time::sleep_until(drain_deadline) => {
                 info!(%token_short, "WS drain timeout，切換到 QUIC");
                 break;
@@ -424,11 +433,7 @@ async fn bridge_tcp_ws_with_swap(
         }
     }
 
-    // 2b. 寫入 drain 期間 buffer 的 TCP data 到 QUIC
-    //     （drain 期間 TCP→backend 路徑暫停了，TCP socket buffer 有未讀資料）
-    //     這裡不需要特別處理 — 下面的 QUIC bridge loop 會自動讀取
-
-    // 2c. 寫入 buffer 的 QUIC data 到 TCP（保持順序：先 WS drain data，後 QUIC data）
+    // Flush buffered QUIC data → TCP（保持順序：先 WS drain，後 QUIC）
     if !quic_buffer.is_empty() {
         info!(%token_short, bytes = quic_buffer.len(), "寫入 QUIC buffer 資料");
         if tcp_write.write_all(&quic_buffer).await.is_err() {
@@ -437,18 +442,26 @@ async fn bridge_tcp_ws_with_swap(
         }
     }
 
+    // Flush buffered TCP data → QUIC
+    if !tcp_outbound_buffer.is_empty()
+        && quic_send.write_all(&tcp_outbound_buffer).await.is_err()
+    {
+        warn!(%token_short, "QUIC 寫入 TCP buffer 失敗");
+        return Ok(());
+    }
+
     let _ = event_tx.send(TunnelEvent::TransportUpgraded);
     info!(%token_short, "Mid-game swap 完成，進入 QUIC direct bridge");
 
-    // Phase 3: QUIC direct bridge
+    // Phase 3: QUIC direct bridge（兩個 buf 因為 select! 需要獨立 borrow）
     let mut total_tcp_to_quic: u64 = 0;
     let mut total_quic_to_tcp: u64 = 0;
-    let mut buf_a = [0u8; RELAY_BUF_SIZE];
-    let mut buf_b = [0u8; RELAY_BUF_SIZE];
+    let mut buf_tcp = [0u8; RELAY_BUF_SIZE];
+    let mut buf_quic = [0u8; RELAY_BUF_SIZE];
 
     loop {
         tokio::select! {
-            result = tcp_read.read(&mut buf_a) => {
+            result = tcp_read.read(&mut buf_tcp) => {
                 match result {
                     Ok(0) => {
                         info!(%token_short, "TCP 連線關閉（EOF）");
@@ -457,7 +470,7 @@ async fn bridge_tcp_ws_with_swap(
                     }
                     Ok(n) => {
                         total_tcp_to_quic += n as u64;
-                        if quic_send.write_all(&buf_a[..n]).await.is_err() {
+                        if quic_send.write_all(&buf_tcp[..n]).await.is_err() {
                             warn!(%token_short, "QUIC 送出失敗");
                             break;
                         }
@@ -468,11 +481,11 @@ async fn bridge_tcp_ws_with_swap(
                     }
                 }
             }
-            result = quic_recv.read(&mut buf_b) => {
+            result = quic_recv.read(&mut buf_quic) => {
                 match result {
                     Ok(Some(n)) => {
                         total_quic_to_tcp += n as u64;
-                        if tcp_write.write_all(&buf_b[..n]).await.is_err() {
+                        if tcp_write.write_all(&buf_quic[..n]).await.is_err() {
                             warn!(%token_short, "TCP 寫入失敗");
                             break;
                         }
