@@ -276,6 +276,10 @@ impl War3App {
                         Transport::Relay => self.log_panel.info("傳輸: Relay 中繼"),
                     }
                 }
+                TunnelEvent::TransportUpgraded => {
+                    self.transport = Some(Transport::Direct);
+                    self.log_panel.info("傳輸升級: Relay → P2P 直連");
+                }
                 TunnelEvent::Finished { error: None } => {
                     if let Some(h) = self.injection_handle.take() {
                         h.abort();
