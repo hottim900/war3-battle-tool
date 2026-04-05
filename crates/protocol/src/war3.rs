@@ -49,17 +49,18 @@ impl std::fmt::Display for War3Version {
 ///   [4..8]   product ID
 ///   [8..12]  version
 ///   [12..16] host counter
-///   [16..]   game name (null-terminated UTF-8)
+///   [16..20] entry key
+///   [20..]   game name (null-terminated UTF-8)
 ///   接著是 0x00 分隔，然後 encoded game settings
-///     第一個 byte 跳過後，decoded data 包含 map path（null-terminated）
+///     decoded data 包含 map path（null-terminated）
 pub fn parse_gameinfo(data: &[u8]) -> Option<GameinfoFields> {
-    // 最小長度：header(4) + product(4) + version(4) + counter(4) + 至少 1 byte name
-    if data.len() < 17 || data[0] != 0xF7 || data[1] != 0x30 {
+    // 最小長度：header(4) + product(4) + version(4) + counter(4) + entry_key(4) + 至少 1 byte name
+    if data.len() < 21 || data[0] != 0xF7 || data[1] != 0x30 {
         return None;
     }
 
-    // Game name starts at offset 16, null-terminated
-    let name_start = 16;
+    // Game name starts at offset 20 (after entry key), null-terminated
+    let name_start = 20;
     let name_end = data[name_start..].iter().position(|&b| b == 0)?;
     let game_name = String::from_utf8_lossy(&data[name_start..name_start + name_end]).into_owned();
 
@@ -95,7 +96,9 @@ fn decode_stat_string(data: &[u8], start: usize) -> Option<String> {
         return None;
     }
 
-    // War3 stat string decoding: 1 mask byte + 7 data bytes per group
+    // War3 stat string decoding:
+    // 1 mask byte + 最多 7 data bytes 為一組
+    // bit=1 → byte 直接使用, bit=0 → byte - 1
     let mut decoded = Vec::new();
     let mut i = 0;
     while i < encoded.len() {
@@ -106,24 +109,24 @@ fn decode_stat_string(data: &[u8], start: usize) -> Option<String> {
                 break;
             }
             if mask & (1 << bit) != 0 {
-                decoded.push(encoded[i] - 1);
-            } else {
                 decoded.push(encoded[i]);
+            } else {
+                decoded.push(encoded[i] - 1);
             }
             i += 1;
         }
     }
 
     // decoded data 格式：
-    //   settings_flags (4 bytes, little-endian)
-    //   map_and_creator: 兩個 null-terminated strings
-    //     第一個是 map path (e.g. "Maps\Download\DotA v6.83d.w3x")
-    if decoded.len() < 5 {
+    //   GameSettings (13 bytes)
+    //   map path (null-terminated string)
+    //   creator name (null-terminated string)
+    if decoded.len() < 14 {
         return None;
     }
 
-    // Skip 4 bytes of settings flags
-    let map_start = 4;
+    // Skip 13 bytes of GameSettings
+    let map_start = 13;
     let map_end = decoded[map_start..]
         .iter()
         .position(|&b| b == 0)
