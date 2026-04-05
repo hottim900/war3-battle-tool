@@ -13,7 +13,8 @@ crates/
 └── spike-packet/  # Windows-only 封包診斷工具（不納入預設 build）
 ```
 
-- Server 部署在 `wss://war3.kalthor.cc/ws`，VPS 139.162.118.18，nginx + CF Origin Cert
+- Server 部署在 `wss://war3.kalthor.cc/ws`，VPS 139.162.118.18（Linode Tokyo），nginx + Let's Encrypt
+- Cloudflare DNS only（灰雲），不走 CF proxy
 - Client 透過 /ws WebSocket 做 lobby，/tunnel WebSocket 做遊戲 relay
 - 不需要 npcap：用 raw UDP (127.0.0.2) 注入 GAMEINFO + TCP proxy 攔截
 - 不需要 port forward：雙方都透過 server tunnel relay
@@ -41,7 +42,7 @@ cargo build --release --package war3-client  # Windows only
 - **零配置**：不需要 npcap、不需要 port forward。下載 exe 打開就能玩
 - **spike-raw-udp/spike-packet** 是驗證用工具，不納入預設 build，已用 `default-members` + `--exclude` 排除
 - **Server bind**：預設 `127.0.0.1`（非 `0.0.0.0`），走 nginx reverse proxy
-- **IP 來源**：server 從 `X-Real-IP` header 讀取真實 IP，僅信任 loopback 連線（nginx）
+- **IP 來源**：server 從 `X-Real-IP` header 讀取真實 IP（nginx 設為 `$remote_addr`），僅信任 loopback 連線
 
 ## Server 安全模型
 

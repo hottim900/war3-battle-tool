@@ -75,12 +75,10 @@ async fn main() {
 }
 
 /// 從 X-Real-IP header 取得真實 IP，僅信任來自 loopback 的連線（nginx）
-/// 從 header 取得真實 IP，支援 nginx (X-Real-IP) 和 Cloudflare Tunnel (Cf-Connecting-Ip)
 fn real_ip(headers: &HeaderMap, fallback: SocketAddr) -> IpAddr {
     if fallback.ip().is_loopback() {
         headers
             .get("x-real-ip")
-            .or_else(|| headers.get("cf-connecting-ip"))
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<IpAddr>().ok())
             .unwrap_or_else(|| fallback.ip())
