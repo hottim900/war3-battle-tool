@@ -31,7 +31,7 @@
 - **When:** 用戶量成長 + Phase 1 WAN 驗證完成後
 
 ### P2P 延伸
-- [ ] UPnP 支援（~50 行，40% 額外直連率，零風險 quick win）
+- [x] UPnP 支援 — **Completed:** PR #13 (2026-04-05), Connection Strategy Engine
 - [ ] 多人 QUIC（>2 人目前用 WS relay）
 - [ ] QUIC stream 斷線後 WS 重建
 - [ ] Binary size CI gate（監控依賴膨脹）
