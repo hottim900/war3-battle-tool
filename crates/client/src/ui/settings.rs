@@ -86,7 +86,7 @@ pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool
     ui.add_space(10.0);
     if *config_changed {
         ui.colored_label(
-            egui::Color32::from_rgb(255, 200, 100),
+            egui::Color32::from_rgb(0xf5, 0x9e, 0x0b),
             "設定已修改，重新連線後生效。",
         );
         if ui.button("儲存設定").clicked() {

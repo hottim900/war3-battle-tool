@@ -111,6 +111,28 @@ impl War3App {
     ) -> Self {
         setup_cjk_fonts(&cc.egui_ctx);
 
+        // 暗色主題 — 配色與 web viewer 一致
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = egui::Color32::from_rgb(0x1a, 0x1a, 0x2e);
+        visuals.window_fill = egui::Color32::from_rgb(0x16, 0x21, 0x3e);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(0x0f, 0x0f, 0x23);
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0x16, 0x21, 0x3e);
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x1e, 0x29, 0x3b);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x33, 0x41, 0x55);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x3b, 0x82, 0xf6);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(0x3b, 0x82, 0xf6);
+        visuals.widgets.noninteractive.fg_stroke =
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(0xcc, 0xd6, 0xf6));
+        cc.egui_ctx.set_visuals(visuals);
+
+        // 全域間距與字型大小
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        if let Some(body) = style.text_styles.get_mut(&egui::TextStyle::Body) {
+            body.size = 15.0;
+        }
+        cc.egui_ctx.set_style(style);
+
         let needs_wizard = !config.is_configured();
         let (tunnel_event_tx, tunnel_event_rx) = mpsc::unbounded_channel();
         let (upnp_mapped_tx, upnp_mapped_rx) = mpsc::unbounded_channel();
@@ -512,7 +534,7 @@ impl War3App {
                 ui.vertical_centered(|ui| {
                     ui.add_space(60.0);
                     ui.colored_label(
-                        egui::Color32::from_rgb(255, 200, 100),
+                        egui::Color32::from_rgb(0xf5, 0x9e, 0x0b),
                         egui::RichText::new("離線模式").size(20.0).strong(),
                     );
                     ui.add_space(8.0);
@@ -553,13 +575,13 @@ impl War3App {
             }
             PendingAction::JoinSuccess => {
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgba_premultiplied(40, 100, 40, 200))
+                    .fill(egui::Color32::from_rgba_unmultiplied(15, 35, 25, 200))
                     .inner_margin(8.0)
                     .corner_radius(4.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.colored_label(
-                                egui::Color32::from_rgb(100, 255, 100),
+                                egui::Color32::from_rgb(0x64, 0xd8, 0x9a),
                                 "加入成功！請切換到 War3 區域網路畫面。",
                             );
                             if ui.button("確定").clicked() {
@@ -572,13 +594,13 @@ impl War3App {
             }
             PendingAction::JoinFailed { reason } => {
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgba_premultiplied(100, 40, 40, 200))
+                    .fill(egui::Color32::from_rgba_unmultiplied(35, 15, 15, 200))
                     .inner_margin(8.0)
                     .corner_radius(4.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.colored_label(
-                                egui::Color32::from_rgb(255, 100, 100),
+                                egui::Color32::from_rgb(0xef, 0x44, 0x44),
                                 format!("加入失敗：{}", reason),
                             );
                             if ui.button("確定").clicked() {
@@ -603,12 +625,14 @@ impl War3App {
     fn show_status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let (color, text) = match &self.connection_state {
-                ConnectionState::Connected => (egui::Color32::from_rgb(100, 200, 100), "● 已連線"),
+                ConnectionState::Connected => {
+                    (egui::Color32::from_rgb(0x64, 0xd8, 0x9a), "● 已連線")
+                }
                 ConnectionState::Disconnected => {
-                    (egui::Color32::from_rgb(200, 100, 100), "● 已斷線")
+                    (egui::Color32::from_rgb(0xef, 0x44, 0x44), "● 已斷線")
                 }
                 ConnectionState::Reconnecting { attempt: _ } => {
-                    (egui::Color32::from_rgb(255, 200, 100), "● 重連中...")
+                    (egui::Color32::from_rgb(0xf5, 0x9e, 0x0b), "● 重連中...")
                 }
             };
             ui.colored_label(color, text);
@@ -674,7 +698,11 @@ impl eframe::App for War3App {
             .min_height(60.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.strong("日誌");
+                    ui.label(
+                        egui::RichText::new("日誌")
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(0x88, 0x92, 0xb0)),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("清除").clicked() {
                             self.log_panel.clear();

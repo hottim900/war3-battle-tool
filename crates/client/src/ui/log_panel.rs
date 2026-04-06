@@ -63,12 +63,15 @@ impl LogPanel {
             .show(ui, |ui| {
                 for entry in &self.entries {
                     let color = match entry.level {
-                        LogLevel::Info => egui::Color32::LIGHT_GRAY,
-                        LogLevel::Warn => egui::Color32::from_rgb(255, 200, 100),
-                        LogLevel::Error => egui::Color32::from_rgb(255, 100, 100),
+                        LogLevel::Info => egui::Color32::from_rgb(0x88, 0x92, 0xb0),
+                        LogLevel::Warn => egui::Color32::from_rgb(0xf5, 0x9e, 0x0b),
+                        LogLevel::Error => egui::Color32::from_rgb(0xef, 0x44, 0x44),
                     };
                     ui.horizontal(|ui| {
-                        ui.weak(&entry.timestamp);
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0x4a, 0x56, 0x68),
+                            &entry.timestamp,
+                        );
                         ui.colored_label(color, &entry.message);
                     });
                 }
