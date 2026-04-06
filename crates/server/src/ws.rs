@@ -253,6 +253,54 @@ pub async fn handle_socket(
                     let _ = tx.try_send(ServerMessage::Pong { ts });
                 }
 
+                ClientMessage::UPnPMapped {
+                    external_addr,
+                    tunnel_token,
+                } => {
+                    if !registered {
+                        continue;
+                    }
+
+                    // Auth check: 只有 host 可以送 UPnPMapped
+                    let joiner_ip = tunnel_state
+                        .lookup_upnp_pending(&tunnel_token, client_ip)
+                        .await;
+                    let Some(joiner_ip) = joiner_ip else {
+                        warn!(
+                            %client_ip,
+                            token = tunnel_token.get(..8).unwrap_or(&tunnel_token),
+                            "UPnPMapped: token 不存在或 IP 不匹配"
+                        );
+                        continue;
+                    };
+
+                    // 找到 joiner 的 tx channel，unicast PeerUPnPAddr
+                    let players = state.players.read().await;
+                    let sent = players.values().any(|p| {
+                        if p.client_ip == joiner_ip && p.disconnected_at.is_none() {
+                            let _ = p.tx.try_send(ServerMessage::PeerUPnPAddr {
+                                external_addr: external_addr.clone(),
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    });
+
+                    if sent {
+                        info!(
+                            token = tunnel_token.get(..8).unwrap_or(&tunnel_token),
+                            %external_addr,
+                            "UPnPMapped: 已轉發 PeerUPnPAddr 給 joiner"
+                        );
+                    } else {
+                        warn!(
+                            token = tunnel_token.get(..8).unwrap_or(&tunnel_token),
+                            "UPnPMapped: 找不到 joiner"
+                        );
+                    }
+                }
+
                 ClientMessage::JoinRoom { room_id } => {
                     if !registered {
                         continue;

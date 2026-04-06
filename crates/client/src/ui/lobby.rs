@@ -1,6 +1,7 @@
 use eframe::egui;
 use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo};
 
+use crate::net::quic::{StrategyOutcome, StrategyResult};
 use crate::net::tunnel::Transport;
 
 /// Action returned from `LobbyPanel::show` so the app can track pending state.
@@ -14,6 +15,7 @@ pub enum LobbyAction {
 pub struct LobbyPanel {
     pub create_max_players: u8,
     pub show_create_dialog: bool,
+    pub show_diagnostics: bool,
 }
 
 impl LobbyPanel {
@@ -21,6 +23,7 @@ impl LobbyPanel {
         Self {
             create_max_players: 4,
             show_create_dialog: false,
+            show_diagnostics: false,
         }
     }
 
@@ -35,6 +38,7 @@ impl LobbyPanel {
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
         latency_ms: u64,
         transport: Option<Transport>,
+        diagnostics: &[StrategyResult],
     ) -> LobbyAction {
         let mut action = LobbyAction::None;
 
@@ -125,6 +129,81 @@ impl LobbyPanel {
             && let Some(create_action) = self.show_create_room_dialog(ui)
         {
             action = create_action;
+        }
+
+        // 連線詳情面板（有診斷資料時顯示）
+        if !diagnostics.is_empty() {
+            ui.add_space(10.0);
+            let label = if self.show_diagnostics {
+                "▼ 連線詳情"
+            } else {
+                "▶ 連線詳情"
+            };
+            if ui.selectable_label(self.show_diagnostics, label).clicked() {
+                self.show_diagnostics = !self.show_diagnostics;
+            }
+
+            if self.show_diagnostics {
+                egui::Frame::new()
+                    .fill(ui.style().visuals.extreme_bg_color)
+                    .inner_margin(8.0)
+                    .corner_radius(4.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("diagnostics_grid")
+                            .num_columns(3)
+                            .striped(true)
+                            .spacing([10.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("策略");
+                                ui.strong("結果");
+                                ui.strong("耗時");
+                                ui.end_row();
+
+                                for r in diagnostics {
+                                    ui.label(r.method.to_string());
+                                    match &r.outcome {
+                                        StrategyOutcome::Success => {
+                                            ui.colored_label(
+                                                egui::Color32::from_rgb(100, 200, 100),
+                                                format!("✓ 成功 ({}ms)", r.duration_ms),
+                                            );
+                                        }
+                                        StrategyOutcome::Failed(reason) => {
+                                            ui.colored_label(
+                                                egui::Color32::from_rgb(255, 100, 100),
+                                                format!("✗ {reason}"),
+                                            );
+                                        }
+                                        StrategyOutcome::Skipped => {
+                                            ui.weak("— 跳過");
+                                        }
+                                    }
+                                    if r.duration_ms > 0 {
+                                        ui.label(format!("{}ms", r.duration_ms));
+                                    } else {
+                                        ui.weak("—");
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+
+                        // 目前連線狀態
+                        if let Some(t) = transport {
+                            ui.add_space(4.0);
+                            let (color, text) = match t {
+                                Transport::Direct => (
+                                    egui::Color32::from_rgb(100, 200, 100),
+                                    format!("目前連線: QUIC 直連 ({latency_ms}ms)"),
+                                ),
+                                Transport::Relay => (
+                                    egui::Color32::from_rgb(255, 200, 100),
+                                    format!("目前連線: Relay 中繼 ({latency_ms}ms)"),
+                                ),
+                            };
+                            ui.colored_label(color, text);
+                        }
+                    });
+            }
         }
 
         ui.add_space(20.0);

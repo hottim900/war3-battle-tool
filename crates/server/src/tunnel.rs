@@ -35,6 +35,15 @@ pub struct TunnelState {
     token_bindings: RwLock<HashMap<String, TokenBinding>>,
     /// per-IP tunnel 連線數
     connections_per_ip: RwLock<HashMap<IpAddr, u32>>,
+    /// token → (host_ip, joiner_ip)，UPnP 用，獨立於 token_bindings 生命週期
+    /// JoinRoom 時寫入，UPnPMapped 處理後移除，10s TTL 由 cleanup_expired 清理
+    upnp_pending: RwLock<HashMap<String, UPnPPending>>,
+}
+
+struct UPnPPending {
+    host_ip: IpAddr,
+    joiner_ip: IpAddr,
+    created_at: Instant,
 }
 
 impl TunnelState {
@@ -43,6 +52,7 @@ impl TunnelState {
             waiting: RwLock::new(HashMap::new()),
             token_bindings: RwLock::new(HashMap::new()),
             connections_per_ip: RwLock::new(HashMap::new()),
+            upnp_pending: RwLock::new(HashMap::new()),
         })
     }
 
@@ -58,10 +68,32 @@ impl TunnelState {
 
     /// 註冊 token 的 IP 綁定（ws.rs JoinRoom 時呼叫）
     pub async fn register_token(&self, token: String, host_ip: IpAddr, joiner_ip: IpAddr) {
+        self.upnp_pending.write().await.insert(
+            token.clone(),
+            UPnPPending {
+                host_ip,
+                joiner_ip,
+                created_at: Instant::now(),
+            },
+        );
         self.token_bindings
             .write()
             .await
             .insert(token, TokenBinding { host_ip, joiner_ip });
+    }
+
+    /// 查詢 UPnP pending（驗證 host IP 並返回 joiner IP）
+    pub async fn lookup_upnp_pending(
+        &self,
+        token: &str,
+        claimed_host_ip: IpAddr,
+    ) -> Option<IpAddr> {
+        let pending = self.upnp_pending.read().await;
+        let entry = pending.get(token)?;
+        if entry.host_ip != claimed_host_ip {
+            return None;
+        }
+        Some(entry.joiner_ip)
     }
 
     /// 驗證 token 的 IP 是否匹配
@@ -108,6 +140,10 @@ impl TunnelState {
             }
             info!(removed = expired_tokens.len(), "清理過期 tunnel sessions");
         }
+
+        // 清理過期的 UPnP pending（10 秒 TTL）
+        let mut upnp = self.upnp_pending.write().await;
+        upnp.retain(|_, v| v.created_at.elapsed() < Duration::from_secs(10));
     }
 }
 

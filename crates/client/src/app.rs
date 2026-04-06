@@ -1,13 +1,15 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use eframe::egui;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo, ServerMessage};
 
 use crate::net::discovery::NetEvent;
 use crate::net::packet::{RawUdpInjector, check_room};
+use crate::net::quic::StrategyResult;
 use crate::net::tunnel::{self, Transport, TunnelEvent};
 use crate::ui::lobby::{LobbyAction, LobbyPanel};
 use crate::ui::log_panel::LogPanel;
@@ -85,6 +87,14 @@ pub struct War3App {
     peer_addr: Option<std::net::IpAddr>,
     /// 目前遊戲傳輸路徑（relay 或 direct）
     transport: Option<Transport>,
+
+    /// Joiner 的 UPnP addr oneshot sender（一次只有一個 active joiner）
+    upnp_addr_sender: Option<oneshot::Sender<SocketAddr>>,
+    /// Host 的 UPnP mapped 通知 channel（background_quic_host 送出，app 層轉發給 server）
+    upnp_mapped_tx: mpsc::UnboundedSender<(String, SocketAddr)>,
+    upnp_mapped_rx: mpsc::UnboundedReceiver<(String, SocketAddr)>,
+    /// 連線策略診斷結果
+    connection_diagnostics: Vec<StrategyResult>,
 }
 
 impl War3App {
@@ -101,6 +111,7 @@ impl War3App {
 
         let needs_wizard = !config.is_configured();
         let (tunnel_event_tx, tunnel_event_rx) = mpsc::unbounded_channel();
+        let (upnp_mapped_tx, upnp_mapped_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
             config,
@@ -132,6 +143,10 @@ impl War3App {
             tunnel_latency_ms: Arc::new(AtomicU64::new(0)),
             peer_addr: None,
             transport: None,
+            upnp_addr_sender: None,
+            upnp_mapped_tx,
+            upnp_mapped_rx,
+            connection_diagnostics: Vec::new(),
         };
 
         app.log_panel.info("War3 Battle Tool 啟動");
@@ -171,16 +186,28 @@ impl War3App {
     /// 啟動 joiner 端 tunnel 和 GAMEINFO 注入
     fn start_joiner_tunnel(&mut self, tunnel_token: String, gameinfo: Vec<u8>) {
         self.abort_tunnel();
+        self.connection_diagnostics.clear();
 
         let server_url = self.server_url.clone();
         let event_tx = self.tunnel_event_tx.clone();
         let peer_addr = self.peer_addr.take();
 
+        // UPnP addr oneshot：server 送 PeerUPnPAddr 時透過這個 channel 傳給 tunnel task
+        let (upnp_tx, upnp_rx) = oneshot::channel::<SocketAddr>();
+        self.upnp_addr_sender = Some(upnp_tx);
+
         self.tunnel_latency_ms.store(0, Ordering::Relaxed);
         let tunnel_lat = self.tunnel_latency_ms.clone();
         let handle = self.rt_handle.spawn(async move {
-            tunnel::run_joiner_tunnel(server_url, tunnel_token, peer_addr, event_tx, tunnel_lat)
-                .await;
+            tunnel::run_joiner_tunnel(
+                server_url,
+                tunnel_token,
+                peer_addr,
+                upnp_rx,
+                event_tx,
+                tunnel_lat,
+            )
+            .await;
         });
         self.tunnel_handle = Some(handle);
 
@@ -191,16 +218,25 @@ impl War3App {
     /// 啟動 host 端 tunnel
     fn start_host_tunnel(&mut self, tunnel_token: String) {
         self.abort_tunnel();
+        self.connection_diagnostics.clear();
 
         let server_url = self.server_url.clone();
         let event_tx = self.tunnel_event_tx.clone();
         let peer_addr = self.peer_addr.take();
+        let mapped_tx = self.upnp_mapped_tx.clone();
 
         self.tunnel_latency_ms.store(0, Ordering::Relaxed);
         let tunnel_lat = self.tunnel_latency_ms.clone();
         let handle = self.rt_handle.spawn(async move {
-            tunnel::run_host_tunnel(server_url, tunnel_token, peer_addr, event_tx, tunnel_lat)
-                .await;
+            tunnel::run_host_tunnel(
+                server_url,
+                tunnel_token,
+                peer_addr,
+                mapped_tx,
+                event_tx,
+                tunnel_lat,
+            )
+            .await;
         });
         self.tunnel_handle = Some(handle);
     }
@@ -270,6 +306,14 @@ impl War3App {
             }
         }
 
+        // 處理 host UPnP mapped 通知（背景 task → app → server）
+        while let Ok((token, addr)) = self.upnp_mapped_rx.try_recv() {
+            let _ = self.cmd_tx.send(ClientMessage::UPnPMapped {
+                external_addr: addr.to_string(),
+                tunnel_token: token,
+            });
+        }
+
         // 處理 tunnel 事件
         while let Ok(event) = self.tunnel_event_rx.try_recv() {
             match event {
@@ -305,6 +349,24 @@ impl War3App {
                     self.transport = None;
                     self.tunnel_latency_ms.store(0, Ordering::Relaxed);
                     self.log_panel.error(format!("Tunnel 錯誤: {e}"));
+                }
+                TunnelEvent::StrategyResults(results) => {
+                    for r in &results {
+                        let status = match &r.outcome {
+                            crate::net::quic::StrategyOutcome::Success => {
+                                format!("成功 ({}ms)", r.duration_ms)
+                            }
+                            crate::net::quic::StrategyOutcome::Failed(reason) => {
+                                format!("失敗: {reason}")
+                            }
+                            crate::net::quic::StrategyOutcome::Skipped => "跳過".to_string(),
+                        };
+                        self.log_panel.info(format!(
+                            "策略 {}: {} ({}ms)",
+                            r.method, status, r.duration_ms
+                        ));
+                    }
+                    self.connection_diagnostics = results;
                 }
                 TunnelEvent::GameinfoCaptured {
                     room_name,
@@ -384,6 +446,30 @@ impl War3App {
                 if let Ok(ip) = peer_addr.parse::<std::net::IpAddr>() {
                     self.peer_addr = Some(ip);
                     self.log_panel.info("收到 P2P 直連資訊");
+                }
+            }
+            ServerMessage::PeerUPnPAddr { external_addr } => {
+                // SSRF check：parse 並拒絕 RFC1918/loopback/link-local
+                match external_addr.parse::<SocketAddr>() {
+                    Ok(addr) if is_safe_external_addr(addr.ip()) => {
+                        self.log_panel.info(format!("收到 UPnP 直連位址: {addr}"));
+                        // 送給當前 tunnel task（只有一個 active joiner）
+                        if let Some(sender) = self.upnp_addr_sender.take() {
+                            if sender.send(addr).is_err() {
+                                self.log_panel.warn("UPnP 位址收到但 tunnel 已結束");
+                            }
+                        } else {
+                            self.log_panel.warn("UPnP 位址收到但無 tunnel 等待接收");
+                        }
+                    }
+                    Ok(addr) => {
+                        self.log_panel
+                            .warn(format!("UPnP 位址被拒絕（不安全位址）: {}", addr.ip()));
+                    }
+                    Err(_) => {
+                        self.log_panel
+                            .warn(format!("UPnP 位址格式錯誤: {external_addr}"));
+                    }
                 }
             }
             ServerMessage::Pong { .. } => {
@@ -615,6 +701,7 @@ impl eframe::App for War3App {
                     &self.cmd_tx,
                     latency,
                     self.transport,
+                    &self.connection_diagnostics,
                 );
                 match action {
                     LobbyAction::None => {}
@@ -670,6 +757,25 @@ impl Drop for War3App {
         }
         if let Some(h) = self.injection_handle.take() {
             h.abort();
+        }
+    }
+}
+
+/// SSRF 防護：拒絕 RFC1918、loopback、link-local 位址
+fn is_safe_external_addr(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !v4.is_loopback()
+                && !v4.is_private()
+                && !v4.is_link_local()
+                && !v4.is_broadcast()
+                && !v4.is_unspecified()
+        }
+        std::net::IpAddr::V6(v6) => {
+            !v6.is_loopback()
+                && !v6.is_unspecified()
+                // ULA (fc00::/7) 和 link-local (fe80::/10)
+                && !matches!(v6.segments()[0], 0xfc00..=0xfdff | 0xfe80..=0xfebf)
         }
     }
 }
