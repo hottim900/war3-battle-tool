@@ -115,13 +115,25 @@ h1{font-size:18px;color:#8892b0;margin-bottom:24px;text-align:center}
         el.innerHTML = '<div class="center-text"><span class="spinner"></span>連線中...</div>';
         break;
       case 'waiting':
-        el.innerHTML = '<div class="center-text"><span class="spinner"></span>等待房間建立中...</div>';
+        el.innerHTML =
+          '<div class="center-text">' +
+            '<span class="status-badge badge-waiting">等待中</span>' +
+            '<p style="margin-top:16px">朋友的房間還沒建好，建好後會自動顯示。</p>' +
+            '<p style="margin-top:8px;color:#64748b;font-size:14px">你可以先下載，等房間出現後直接加入。</p>' +
+          '</div>' +
+          '<a href="' + DOWNLOAD_URL + '" class="btn btn-primary" target="_blank" rel="noopener" style="margin-top:20px">先下載 War3 Battle Tool</a>' +
+          '<p style="text-align:center;margin-top:16px;color:#64748b;font-size:13px">' +
+            '下載後開啟 → 輸入暱稱 → 在大廳找到朋友的房間 → 加入' +
+          '</p>';
         break;
       case 'active':
         // renderRoom handles this
         break;
       case 'closed':
-        el.innerHTML = '<div class="center-text"><span class="status-badge badge-closed">已關閉</span><p style="margin-top:16px">房間已關閉</p></div>';
+        el.innerHTML =
+          '<div class="center-text"><span class="status-badge badge-closed">已關閉</span>' +
+          '<p style="margin-top:16px">房間已關閉</p></div>' +
+          '<a href="' + DOWNLOAD_URL + '" class="btn btn-primary" target="_blank" rel="noopener" style="margin-top:20px">下載 War3 Battle Tool</a>';
         break;
       case 'offline':
         el.innerHTML = '<div class="center-text"><span class="spinner"></span>無法連線伺服器，重試中...</div>';
@@ -140,6 +152,9 @@ h1{font-size:18px;color:#8892b0;margin-bottom:24px;text-align:center}
         '<div class="room-players">' + room.current_players + ' / ' + room.max_players + ' 位玩家</div>' +
       '</div>' +
       '<a href="' + DOWNLOAD_URL + '" class="btn btn-primary" target="_blank" rel="noopener">下載 War3 Battle Tool</a>' +
+      '<p style="text-align:center;margin-top:12px;color:#64748b;font-size:13px">' +
+        '下載後開啟 → 輸入暱稱 → 在大廳找到房間 → 點「加入」' +
+      '</p>' +
       '<div class="tooltip" id="copy-wrap">' +
         '<span class="tip-text">已複製!</span>' +
         '<button class="btn btn-secondary" onclick="copyLink()">複製分享連結</button>' +
