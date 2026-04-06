@@ -96,7 +96,13 @@ impl LobbyPanel {
                                     .unwrap_or(false);
 
                                 if is_mine {
-                                    ui.label("(你的房間)");
+                                    if ui.button("複製連結").clicked() {
+                                        let link = format!(
+                                            "https://war3.kalthor.cc/join?room={}",
+                                            room.room_id
+                                        );
+                                        ui.ctx().copy_text(link);
+                                    }
                                 } else if ui.button("加入").clicked() {
                                     let _ = cmd_tx.send(ClientMessage::JoinRoom {
                                         room_id: room.room_id.clone(),
