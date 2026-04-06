@@ -62,6 +62,28 @@ pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool
     });
 
     ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.label("網路說明");
+    ui.add_space(4.0);
+    ui.collapsing("防火牆 / UPnP / P2P 直連", |ui| {
+        ui.label(
+            "Windows 防火牆：建議選「允許」以啟用 P2P 直連。\
+            選「封鎖」仍可透過雲端中轉正常使用。",
+        );
+        ui.add_space(4.0);
+        ui.label(
+            "UPnP：程式會自動在路由器開啟連接埠，不需手動設定。\
+            不支援 UPnP 時自動改用雲端中轉。",
+        );
+        ui.add_space(4.0);
+        ui.label(
+            "P2P 直連 (QUIC)：對戰時優先嘗試直連以降低延遲。\
+            不支援時自動降級為雲端中轉，兩種方式都能正常對戰。",
+        );
+    });
+
+    ui.add_space(10.0);
     if *config_changed {
         ui.colored_label(
             egui::Color32::from_rgb(255, 200, 100),
