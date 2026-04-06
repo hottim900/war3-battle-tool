@@ -401,4 +401,100 @@ mod tests {
         state.cleanup_expired().await;
         assert_eq!(state.waiting.read().await.len(), 0);
     }
+
+    // ── T7: Auth check — joiner 送 UPnPMapped 被拒絕 ──
+
+    #[tokio::test]
+    async fn lookup_upnp_pending_correct_host_returns_joiner() {
+        let state = TunnelState::new();
+        let host_ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let joiner_ip: IpAddr = "5.6.7.8".parse().unwrap();
+
+        state
+            .register_token("token-abc".into(), host_ip, joiner_ip)
+            .await;
+
+        // 正確 host IP → 拿到 joiner IP
+        let result = state.lookup_upnp_pending("token-abc", host_ip).await;
+        assert_eq!(result, Some(joiner_ip));
+    }
+
+    #[tokio::test]
+    async fn lookup_upnp_pending_wrong_ip_returns_none() {
+        let state = TunnelState::new();
+        let host_ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let joiner_ip: IpAddr = "5.6.7.8".parse().unwrap();
+        let attacker_ip: IpAddr = "9.9.9.9".parse().unwrap();
+
+        state
+            .register_token("token-abc".into(), host_ip, joiner_ip)
+            .await;
+
+        // joiner 冒充 host → None
+        let result = state.lookup_upnp_pending("token-abc", joiner_ip).await;
+        assert_eq!(result, None);
+
+        // 第三方攻擊者 → None
+        let result = state.lookup_upnp_pending("token-abc", attacker_ip).await;
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn lookup_upnp_pending_unknown_token_returns_none() {
+        let state = TunnelState::new();
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+
+        let result = state.lookup_upnp_pending("nonexistent", ip).await;
+        assert_eq!(result, None);
+    }
+
+    // ── T4: Duplicate UPnPMapped → idempotent ──
+
+    #[tokio::test]
+    async fn lookup_upnp_pending_idempotent() {
+        let state = TunnelState::new();
+        let host_ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let joiner_ip: IpAddr = "5.6.7.8".parse().unwrap();
+
+        state
+            .register_token("token-abc".into(), host_ip, joiner_ip)
+            .await;
+
+        // 多次 lookup 都返回相同結果，不 panic
+        let r1 = state.lookup_upnp_pending("token-abc", host_ip).await;
+        let r2 = state.lookup_upnp_pending("token-abc", host_ip).await;
+        let r3 = state.lookup_upnp_pending("token-abc", host_ip).await;
+        assert_eq!(r1, Some(joiner_ip));
+        assert_eq!(r2, Some(joiner_ip));
+        assert_eq!(r3, Some(joiner_ip));
+    }
+
+    // ── UPnP pending cleanup ──
+
+    #[tokio::test]
+    async fn upnp_pending_cleanup_expired() {
+        let state = TunnelState::new();
+        let host_ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let joiner_ip: IpAddr = "5.6.7.8".parse().unwrap();
+
+        // 插入一筆已過期的 upnp_pending（created_at 在 11 秒前）
+        state.upnp_pending.write().await.insert(
+            "expired-token".into(),
+            UPnPPending {
+                host_ip,
+                joiner_ip,
+                created_at: Instant::now() - Duration::from_secs(11),
+            },
+        );
+        // 插入一筆未過期的
+        state
+            .register_token("fresh-token".into(), host_ip, joiner_ip)
+            .await;
+
+        assert_eq!(state.upnp_pending.read().await.len(), 2);
+        state.cleanup_expired().await;
+        // 過期的被清掉，新的留著
+        assert_eq!(state.upnp_pending.read().await.len(), 1);
+        assert!(state.upnp_pending.read().await.contains_key("fresh-token"));
+    }
 }

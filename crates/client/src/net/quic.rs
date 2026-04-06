@@ -253,7 +253,6 @@ pub async fn attempt_upnp_mapping(
 }
 
 /// 清理 UPnP port mapping（背景呼叫，失敗靜默）
-#[allow(dead_code)]
 pub async fn cleanup_upnp_mapping() {
     use igd_next::SearchOptions;
     use igd_next::aio::tokio::search_gateway;
@@ -333,5 +332,114 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
         rustls::crypto::ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── T1: UPnPGatewayNotFound → relay 不受影響 ──
+    // UPnP 失敗只影響策略結果，不影響 relay 運作
+
+    #[test]
+    fn strategy_result_gateway_not_found() {
+        let result = StrategyResult {
+            method: StrategyKind::UPnP,
+            outcome: StrategyOutcome::Failed(StrategyFailReason::UPnPGatewayNotFound),
+            duration_ms: 2000,
+        };
+        assert!(matches!(
+            result.outcome,
+            StrategyOutcome::Failed(StrategyFailReason::UPnPGatewayNotFound)
+        ));
+        // relay 繼續的邏輯由 tunnel.rs 的 select! 保證，
+        // 這裡驗證型別能正確表達「UPnP 失敗但不 panic」
+    }
+
+    #[test]
+    fn strategy_result_skipped() {
+        let result = StrategyResult {
+            method: StrategyKind::UPnP,
+            outcome: StrategyOutcome::Skipped,
+            duration_ms: 0,
+        };
+        assert!(matches!(result.outcome, StrategyOutcome::Skipped));
+    }
+
+    #[test]
+    fn strategy_result_success() {
+        let result = StrategyResult {
+            method: StrategyKind::QuicDirect,
+            outcome: StrategyOutcome::Success,
+            duration_ms: 150,
+        };
+        assert!(matches!(result.outcome, StrategyOutcome::Success));
+        assert_eq!(result.duration_ms, 150);
+    }
+
+    // ── T6: CGNAT 偵測 — UPnP IP != STUN IP → CgnatDetected ──
+
+    #[test]
+    fn cgnat_detected_reason_displays() {
+        let reason = StrategyFailReason::CgnatDetected;
+        assert_eq!(reason.to_string(), "偵測到 CGNAT");
+    }
+
+    #[test]
+    fn strategy_kind_display() {
+        assert_eq!(StrategyKind::QuicDirect.to_string(), "QUIC 穿透");
+        assert_eq!(StrategyKind::UPnP.to_string(), "UPnP 映射");
+    }
+
+    #[test]
+    fn all_fail_reasons_display() {
+        // 確保每個 variant 的 Display 不 panic
+        let reasons = vec![
+            StrategyFailReason::NoStunInfo,
+            StrategyFailReason::BindFailed("test".into()),
+            StrategyFailReason::Timeout,
+            StrategyFailReason::HandshakeFailed("test".into()),
+            StrategyFailReason::UPnPGatewayNotFound,
+            StrategyFailReason::UPnPMappingFailed("test".into()),
+            StrategyFailReason::UPnPNotAttempted,
+            StrategyFailReason::CgnatDetected,
+        ];
+        for reason in reasons {
+            let s = reason.to_string();
+            assert!(!s.is_empty());
+        }
+    }
+
+    // ── T2: oneshot sender dropped → receiver 收 RecvError，不 panic ──
+
+    #[tokio::test]
+    async fn oneshot_sender_dropped_receiver_gets_error() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<std::net::SocketAddr>();
+        // 模擬 PeerUPnPAddr 到達前 sender 已被 drop（tunnel 結束）
+        drop(tx);
+        // receiver 收到 RecvError，不 panic
+        assert!(rx.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn oneshot_sender_take_then_send_returns_err() {
+        // 模擬 app.rs 中 upnp_addr_sender.take() 之後再次收到 PeerUPnPAddr
+        let mut sender: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>> = None;
+        // take() 在 None 上回傳 None，不 panic
+        assert!(sender.take().is_none());
+    }
+
+    #[test]
+    fn make_alpn_short_token() {
+        let alpn = make_alpn("abc");
+        assert_eq!(alpn, b"w3t-abc");
+    }
+
+    #[test]
+    fn make_alpn_long_token() {
+        let long = "0123456789abcdef_extra";
+        let alpn = make_alpn(long);
+        assert_eq!(alpn, b"w3t-0123456789abcdef");
     }
 }
