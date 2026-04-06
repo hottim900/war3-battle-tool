@@ -44,91 +44,168 @@ impl LobbyPanel {
 
         // 房間區塊
         ui.horizontal(|ui| {
-            ui.heading("房間列表");
+            ui.label(
+                egui::RichText::new("房間列表")
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(0x88, 0x92, 0xb0)),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if latency_ms > 0 {
                     let suffix = match transport {
-                        Some(Transport::Direct) => " (direct)",
-                        Some(Transport::Relay) => " (relay)",
+                        Some(Transport::Direct) => " (直連)",
+                        Some(Transport::Relay) => " (中繼)",
                         None => "",
                     };
                     let color = if latency_ms < 30 {
-                        egui::Color32::from_rgb(100, 200, 100) // 綠
+                        egui::Color32::from_rgb(0x64, 0xd8, 0x9a)
                     } else if latency_ms < 80 {
-                        egui::Color32::from_rgb(255, 200, 100) // 黃
+                        egui::Color32::from_rgb(0xf5, 0x9e, 0x0b)
                     } else {
-                        egui::Color32::from_rgb(255, 100, 100) // 紅
+                        egui::Color32::from_rgb(0xef, 0x44, 0x44)
                     };
                     ui.colored_label(color, format!("延遲: {latency_ms}ms{suffix}"));
                 }
             });
         });
-        ui.separator();
 
         if rooms.is_empty() {
-            ui.label("目前沒有房間。建立一個來開始對戰！");
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("目前沒有房間")
+                        .size(14.0)
+                        .color(egui::Color32::from_rgb(0x88, 0x92, 0xb0)),
+                );
+            });
+            ui.add_space(20.0);
         } else {
             egui::ScrollArea::vertical()
                 .id_salt("rooms_scroll")
                 .max_height(250.0)
                 .show(ui, |ui| {
-                    egui::Grid::new("room_grid")
-                        .num_columns(5)
-                        .striped(true)
-                        .spacing([10.0, 6.0])
-                        .show(ui, |ui| {
-                            // 表頭
-                            ui.strong("房間");
-                            ui.strong("房主");
-                            ui.strong("地圖");
-                            ui.strong("人數");
-                            ui.strong("");
-                            ui.end_row();
+                    for room in rooms {
+                        let is_mine = my_nickname
+                            .map(|name| room.host_nickname == name)
+                            .unwrap_or(false);
+                        let room_full = room.current_players >= room.max_players;
 
-                            for room in rooms {
-                                ui.label(&room.room_name);
-                                ui.label(&room.host_nickname);
-                                ui.label(&room.map_name);
-                                ui.label(format!("{}/{}", room.current_players, room.max_players));
+                        // 自己的房間用左邊框強調
+                        let border_stroke = if is_mine {
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(0x3b, 0x82, 0xf6))
+                        } else {
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(0x1e, 0x29, 0x3b))
+                        };
 
-                                let is_mine = my_nickname
-                                    .map(|name| room.host_nickname == name)
-                                    .unwrap_or(false);
-
-                                if is_mine {
-                                    if ui.button("複製連結").clicked() {
-                                        let link = format!(
-                                            "https://war3.kalthor.cc/join?room={}",
-                                            room.room_id
-                                        );
-                                        ui.ctx().copy_text(link);
-                                    }
-                                } else if ui.button("加入").clicked() {
-                                    let _ = cmd_tx.send(ClientMessage::JoinRoom {
-                                        room_id: room.room_id.clone(),
+                        egui::Frame::new()
+                            .fill(ui.visuals().window_fill)
+                            .stroke(border_stroke)
+                            .inner_margin(12.0)
+                            .corner_radius(8.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&room.host_nickname)
+                                                    .size(15.0)
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(
+                                                        0xcc, 0xd6, 0xf6,
+                                                    )),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(&room.host_nickname);
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&room.map_name)
+                                                    .size(13.0)
+                                                    .color(egui::Color32::from_rgb(
+                                                        0x88, 0x92, 0xb0,
+                                                    )),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(&room.map_name);
                                     });
-                                    action = LobbyAction::JoinRoom {
-                                        room_name: room.room_name.clone(),
-                                    };
-                                }
-                                ui.end_row();
-                            }
-                        });
+
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if is_mine {
+                                                if ui.button("複製連結").clicked() {
+                                                    let link = format!(
+                                                        "https://war3.kalthor.cc/join?room={}",
+                                                        room.room_id
+                                                    );
+                                                    ui.ctx().copy_text(link);
+                                                }
+                                            } else if room_full {
+                                                ui.add_enabled(false, egui::Button::new("已滿"));
+                                            } else if ui.button("加入").clicked() {
+                                                let _ = cmd_tx.send(ClientMessage::JoinRoom {
+                                                    room_id: room.room_id.clone(),
+                                                });
+                                                action = LobbyAction::JoinRoom {
+                                                    room_name: room.room_name.clone(),
+                                                };
+                                            }
+
+                                            let cur = room.current_players as u32;
+                                            let max = room.max_players as u32;
+                                            let badge_color = if cur >= max {
+                                                egui::Color32::from_rgb(0xef, 0x44, 0x44)
+                                            } else if cur * 4 >= max * 3 {
+                                                egui::Color32::from_rgb(0xf5, 0x9e, 0x0b)
+                                            } else {
+                                                egui::Color32::from_rgb(0x64, 0xd8, 0x9a)
+                                            };
+
+                                            egui::Frame::new()
+                                                .fill(egui::Color32::from_rgb(0x1e, 0x29, 0x3b))
+                                                .inner_margin(egui::Margin::symmetric(10, 3))
+                                                .corner_radius(12.0)
+                                                .show(ui, |ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "{}/{}",
+                                                            room.current_players, room.max_players
+                                                        ))
+                                                        .size(12.0)
+                                                        .color(badge_color),
+                                                    );
+                                                });
+                                        },
+                                    );
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
                 });
         }
 
         ui.add_space(10.0);
 
         // 建房 / 關房按鈕
-        ui.horizontal(|ui| {
-            if is_hosting {
-                if ui.button("關閉房間").clicked() {
-                    let _ = cmd_tx.send(ClientMessage::CloseRoom);
-                }
-            } else if ui.button("建立房間").clicked() {
+        if is_hosting {
+            if ui.button("關閉房間").clicked() {
+                let _ = cmd_tx.send(ClientMessage::CloseRoom);
+            }
+        } else {
+            let create_btn = egui::Button::new("+ 建立房間")
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgb(0x33, 0x41, 0x55),
+                ))
+                .corner_radius(8.0);
+            if ui
+                .add_sized([ui.available_width(), 32.0], create_btn)
+                .clicked()
+            {
                 self.show_create_dialog = true;
             }
-        });
+        }
 
         // 建房對話框（房間名和地圖名從 War3 自動偵測）
         if self.show_create_dialog
@@ -170,13 +247,13 @@ impl LobbyPanel {
                                     match &r.outcome {
                                         StrategyOutcome::Success => {
                                             ui.colored_label(
-                                                egui::Color32::from_rgb(100, 200, 100),
+                                                egui::Color32::from_rgb(0x64, 0xd8, 0x9a),
                                                 format!("✓ 成功 ({}ms)", r.duration_ms),
                                             );
                                         }
                                         StrategyOutcome::Failed(reason) => {
                                             ui.colored_label(
-                                                egui::Color32::from_rgb(255, 100, 100),
+                                                egui::Color32::from_rgb(0xef, 0x44, 0x44),
                                                 format!("✗ {reason}"),
                                             );
                                         }
@@ -198,11 +275,11 @@ impl LobbyPanel {
                             ui.add_space(4.0);
                             let (color, text) = match t {
                                 Transport::Direct => (
-                                    egui::Color32::from_rgb(100, 200, 100),
+                                    egui::Color32::from_rgb(0x64, 0xd8, 0x9a),
                                     format!("目前連線: QUIC 直連 ({latency_ms}ms)"),
                                 ),
                                 Transport::Relay => (
-                                    egui::Color32::from_rgb(255, 200, 100),
+                                    egui::Color32::from_rgb(0xf5, 0x9e, 0x0b),
                                     format!("目前連線: Relay 中繼 ({latency_ms}ms)"),
                                 ),
                             };
@@ -216,7 +293,11 @@ impl LobbyPanel {
         ui.separator();
 
         // 線上玩家
-        ui.heading("線上玩家");
+        ui.label(
+            egui::RichText::new("線上玩家")
+                .size(13.0)
+                .color(egui::Color32::from_rgb(0x88, 0x92, 0xb0)),
+        );
         ui.add_space(4.0);
 
         if players.is_empty() {
@@ -232,7 +313,7 @@ impl LobbyPanel {
                             ui.weak(format!("({})", player.war3_version.as_str()));
                             if player.is_hosting {
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(100, 200, 100),
+                                    egui::Color32::from_rgb(0x64, 0xd8, 0x9a),
                                     "🏠 建房中",
                                 );
                             }
