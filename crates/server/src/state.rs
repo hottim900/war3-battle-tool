@@ -7,7 +7,7 @@ use tokio::sync::{RwLock, mpsc};
 use war3_protocol::messages::{PlayerInfo, RoomInfo, ServerMessage};
 use war3_protocol::war3::War3Version;
 
-const MAX_CONNECTIONS_PER_IP: u32 = 3;
+const MAX_CONNECTIONS_PER_IP: u32 = 10;
 
 pub struct ConnectedPlayer {
     pub player_id: String,
