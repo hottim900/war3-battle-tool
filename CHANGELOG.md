@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.2.0] - 2026-04-06
+## [0.3.3] - 2026-04-06
 
 ### Changed
 - 全域暗色主題：配色與 web viewer 一致（#1a1a2e / #16213e / #3b82f6）
@@ -18,7 +18,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - 滿房的房間不再顯示可點擊的「加入」按鈕
 
-## [0.0.1.0] - 2026-04-06
+## [0.3.2] - 2026-04-06
 
 ### Added
 - 首次啟動說明頁：在設定精靈前加一頁，說明 Windows 防火牆、UPnP、P2P 直連、SmartScreen 警告
