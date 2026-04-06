@@ -80,28 +80,9 @@ async fn background_quic_joiner(
     let token_short = tunnel_token.get(..8).unwrap_or(&tunnel_token);
     let mut results: Vec<StrategyResult> = Vec::new();
 
-    // 兩個 QUIC 連線路徑並行，先成功的 win
-    let quic_direct = async {
+    // UPnP path：等 server 轉發 UPnP addr 後連線
+    let try_upnp = async {
         let start = Instant::now();
-        let Some(ip) = peer_ip else {
-            return Err((
-                StrategyFailReason::NoStunInfo,
-                start.elapsed().as_millis() as u64,
-            ));
-        };
-        let target = SocketAddr::new(ip, quic::QUIC_DEFAULT_PORT);
-        match quic::connect_direct(target, &tunnel_token).await {
-            Ok((send, recv)) => Ok((send, recv, start.elapsed().as_millis() as u64)),
-            Err(e) => Err((
-                StrategyFailReason::HandshakeFailed(e.to_string()),
-                start.elapsed().as_millis() as u64,
-            )),
-        }
-    };
-
-    let quic_via_upnp = async {
-        let start = Instant::now();
-        // 等 UPnP addr 從 server 轉發過來
         let addr = upnp_addr_rx
             .await
             .map_err(|_| (StrategyFailReason::UPnPNotAttempted, 0u64))?;
@@ -115,51 +96,91 @@ async fn background_quic_joiner(
         }
     };
 
-    // select! 先成功的 arm 勝出
-    tokio::select! {
-        result = quic_direct => {
-            match result {
-                Ok((mut send, mut recv, dur)) => {
-                    results.push(StrategyResult {
-                        method: StrategyKind::QuicDirect,
-                        outcome: StrategyOutcome::Success,
-                        duration_ms: dur,
-                    });
-                    // Swap handshake
-                    if do_joiner_swap_handshake(&mut send, &mut recv, token_short).await {
-                        let _ = swap_tx.send(QuicSwapReady { send, recv }).await;
+    if let Some(ip) = peer_ip {
+        // 有 STUN info：兩路並行，先成功的 win
+        let try_direct = async {
+            let start = Instant::now();
+            let target = SocketAddr::new(ip, quic::QUIC_DEFAULT_PORT);
+            match quic::connect_direct(target, &tunnel_token).await {
+                Ok((send, recv)) => Ok((send, recv, start.elapsed().as_millis() as u64)),
+                Err(e) => Err((
+                    StrategyFailReason::HandshakeFailed(e.to_string()),
+                    start.elapsed().as_millis() as u64,
+                )),
+            }
+        };
+
+        tokio::select! {
+            result = try_direct => {
+                match result {
+                    Ok((mut send, mut recv, dur)) => {
+                        results.push(StrategyResult {
+                            method: StrategyKind::QuicDirect,
+                            outcome: StrategyOutcome::Success,
+                            duration_ms: dur,
+                        });
+                        if do_joiner_swap_handshake(&mut send, &mut recv, token_short).await {
+                            let _ = swap_tx.send(QuicSwapReady { send, recv }).await;
+                        }
+                    }
+                    Err((reason, dur)) => {
+                        info!(%token_short, %reason, "QUIC 直連失敗");
+                        results.push(StrategyResult {
+                            method: StrategyKind::QuicDirect,
+                            outcome: StrategyOutcome::Failed(reason),
+                            duration_ms: dur,
+                        });
                     }
                 }
-                Err((reason, dur)) => {
-                    info!(%token_short, %reason, "QUIC 直連失敗");
-                    results.push(StrategyResult {
-                        method: StrategyKind::QuicDirect,
-                        outcome: StrategyOutcome::Failed(reason),
-                        duration_ms: dur,
-                    });
+            }
+            result = try_upnp => {
+                match result {
+                    Ok((mut send, mut recv, dur)) => {
+                        results.push(StrategyResult {
+                            method: StrategyKind::UPnP,
+                            outcome: StrategyOutcome::Success,
+                            duration_ms: dur,
+                        });
+                        if do_joiner_swap_handshake(&mut send, &mut recv, token_short).await {
+                            let _ = swap_tx.send(QuicSwapReady { send, recv }).await;
+                        }
+                    }
+                    Err((reason, dur)) => {
+                        info!(%token_short, %reason, "UPnP 路徑失敗");
+                        results.push(StrategyResult {
+                            method: StrategyKind::UPnP,
+                            outcome: StrategyOutcome::Failed(reason),
+                            duration_ms: dur,
+                        });
+                    }
                 }
             }
         }
-        result = quic_via_upnp => {
-            match result {
-                Ok((mut send, mut recv, dur)) => {
-                    results.push(StrategyResult {
-                        method: StrategyKind::UPnP,
-                        outcome: StrategyOutcome::Success,
-                        duration_ms: dur,
-                    });
-                    if do_joiner_swap_handshake(&mut send, &mut recv, token_short).await {
-                        let _ = swap_tx.send(QuicSwapReady { send, recv }).await;
-                    }
+    } else {
+        // 無 STUN info：直連不可能，只嘗試 UPnP
+        results.push(StrategyResult {
+            method: StrategyKind::QuicDirect,
+            outcome: StrategyOutcome::Failed(StrategyFailReason::NoStunInfo),
+            duration_ms: 0,
+        });
+        match try_upnp.await {
+            Ok((mut send, mut recv, dur)) => {
+                results.push(StrategyResult {
+                    method: StrategyKind::UPnP,
+                    outcome: StrategyOutcome::Success,
+                    duration_ms: dur,
+                });
+                if do_joiner_swap_handshake(&mut send, &mut recv, token_short).await {
+                    let _ = swap_tx.send(QuicSwapReady { send, recv }).await;
                 }
-                Err((reason, dur)) => {
-                    info!(%token_short, %reason, "UPnP 路徑失敗");
-                    results.push(StrategyResult {
-                        method: StrategyKind::UPnP,
-                        outcome: StrategyOutcome::Failed(reason),
-                        duration_ms: dur,
-                    });
-                }
+            }
+            Err((reason, dur)) => {
+                info!(%token_short, %reason, "UPnP 路徑失敗");
+                results.push(StrategyResult {
+                    method: StrategyKind::UPnP,
+                    outcome: StrategyOutcome::Failed(reason),
+                    duration_ms: dur,
+                });
             }
         }
     }
@@ -393,7 +414,7 @@ pub async fn run_joiner_tunnel(
 pub async fn run_host_tunnel(
     server_url: String,
     tunnel_token: String,
-    peer_addr: Option<IpAddr>,
+    _peer_addr: Option<IpAddr>,
     upnp_mapped_tx: mpsc::UnboundedSender<(String, SocketAddr)>,
     event_tx: mpsc::UnboundedSender<TunnelEvent>,
     latency_ms: Arc<AtomicU64>,
@@ -435,7 +456,9 @@ pub async fn run_host_tunnel(
     {
         info!(%token_short, "背景嘗試 QUIC host 監聽 + UPnP");
         let token = tunnel_token.clone();
-        let stun_ip = peer_addr;
+        // CGNAT 偵測需要 host 自己的 STUN IP（server 目前只傳 peer 的 IP）
+        // peer_addr 是對方的 IP，不能用來比較，暫時傳 None 跳過 CGNAT 偵測
+        let stun_ip = None::<IpAddr>;
         let mapped_tx = upnp_mapped_tx;
         let etx = event_tx.clone();
         tokio::spawn(background_quic_host(
@@ -453,6 +476,9 @@ pub async fn run_host_tunnel(
         &token_short,
     )
     .await;
+    // 4. Tunnel 結束，清理 UPnP port mapping（如果有的話）
+    tokio::spawn(quic::cleanup_upnp_mapping());
+
     let _ = event_tx.send(TunnelEvent::Finished {
         error: result.err(),
     });
