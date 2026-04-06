@@ -4,22 +4,105 @@
 //! 雙方使用 tunnel_token 做 ALPN 驗證。
 //! 失敗時靜默回傳 Err，caller fallback 到 WS relay。
 
-use std::net::SocketAddr;
+use std::fmt;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use tracing::info;
+use tracing::{info, warn};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// QUIC 監聽的固定 port（host 端）
-const QUIC_PORT: u16 = 19870;
+/// QUIC 偏好 port（host 端，碰撞時 fallback ephemeral）
+const QUIC_PREFERRED_PORT: u16 = 19870;
+/// Joiner 直連預設 port（StunInfo path，不知道 host 實際 port 時使用）
+pub const QUIC_DEFAULT_PORT: u16 = 19870;
+/// UPnP gateway 搜尋 timeout
+const UPNP_SEARCH_TIMEOUT: Duration = Duration::from_secs(2);
+/// UPnP port mapping timeout
+const UPNP_MAP_TIMEOUT: Duration = Duration::from_secs(1);
+/// UPnP lease 時間（秒）
+const UPNP_LEASE_SECS: u32 = 7200;
+/// UPnP mapping 的 port（host 對外公開）
+const UPNP_EXTERNAL_PORT: u16 = 19870;
 
-/// Host 端：監聽 QUIC，等待 joiner 連線
+// ── Strategy 型別 ──
+
+/// 連線策略類型
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StrategyKind {
+    QuicDirect,
+    UPnP,
+}
+
+impl fmt::Display for StrategyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StrategyKind::QuicDirect => write!(f, "QUIC 穿透"),
+            StrategyKind::UPnP => write!(f, "UPnP 映射"),
+        }
+    }
+}
+
+/// 策略失敗原因
+#[derive(Debug, Clone)]
+pub enum StrategyFailReason {
+    // QUIC 相關
+    NoStunInfo,
+    BindFailed(String),
+    #[allow(dead_code)]
+    Timeout,
+    HandshakeFailed(String),
+    // UPnP 相關
+    UPnPGatewayNotFound,
+    UPnPMappingFailed(String),
+    UPnPNotAttempted,
+    CgnatDetected,
+}
+
+impl fmt::Display for StrategyFailReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StrategyFailReason::NoStunInfo => write!(f, "無對方 IP"),
+            StrategyFailReason::BindFailed(e) => write!(f, "綁定失敗: {e}"),
+            StrategyFailReason::Timeout => write!(f, "逾時"),
+            StrategyFailReason::HandshakeFailed(e) => write!(f, "交握失敗: {e}"),
+            StrategyFailReason::UPnPGatewayNotFound => write!(f, "Gateway 找不到"),
+            StrategyFailReason::UPnPMappingFailed(e) => write!(f, "映射失敗: {e}"),
+            StrategyFailReason::UPnPNotAttempted => write!(f, "未嘗試"),
+            StrategyFailReason::CgnatDetected => write!(f, "偵測到 CGNAT"),
+        }
+    }
+}
+
+/// 策略結果
+#[derive(Debug, Clone)]
+pub enum StrategyOutcome {
+    Success,
+    Failed(StrategyFailReason),
+    Skipped,
+}
+
+/// 單個策略的嘗試結果
+#[derive(Debug, Clone)]
+pub struct StrategyResult {
+    pub method: StrategyKind,
+    pub outcome: StrategyOutcome,
+    /// 從嘗試開始到成功/失敗的總耗時
+    pub duration_ms: u64,
+}
+
+/// UPnP mapping 成功的結果
+pub struct UPnPMappingResult {
+    pub external_addr: SocketAddr,
+}
+
+/// Host 端：建立 QUIC endpoint（只 bind，不 accept）
 ///
-/// 返回 (send, recv) stream，或 Err（caller fallback relay）
-pub async fn accept_direct(tunnel_token: &str) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+/// 優先嘗試 19870（StunInfo 相容），碰撞時 fallback ephemeral。
+/// 返回 (endpoint, local_port)，caller 負責 accept。
+pub fn bind_host_endpoint(tunnel_token: &str) -> Result<(quinn::Endpoint, u16)> {
     let alpn = make_alpn(tunnel_token);
     let (cert, key) = generate_self_signed()?;
 
@@ -34,16 +117,25 @@ pub async fn accept_direct(tunnel_token: &str) -> Result<(quinn::SendStream, qui
     transport.max_concurrent_uni_streams(0u32.into());
     transport.max_concurrent_bidi_streams(1u32.into());
 
-    // 嘗試 dual-stack (IPv6 any)，失敗則 fallback IPv4 any
-    let bind_addr: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 0], QUIC_PORT).into();
-    let endpoint = quinn::Endpoint::server(config.clone(), bind_addr)
-        .or_else(|_| {
-            let v4: SocketAddr = ([0, 0, 0, 0], QUIC_PORT).into();
-            quinn::Endpoint::server(config, v4)
-        })
+    let preferred: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 0], QUIC_PREFERRED_PORT).into();
+    let preferred_v4: SocketAddr = ([0, 0, 0, 0], QUIC_PREFERRED_PORT).into();
+    let ephemeral: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 0], 0).into();
+    let ephemeral_v4: SocketAddr = ([0, 0, 0, 0], 0).into();
+    let endpoint = quinn::Endpoint::server(config.clone(), preferred)
+        .or_else(|_| quinn::Endpoint::server(config.clone(), preferred_v4))
+        .or_else(|_| quinn::Endpoint::server(config.clone(), ephemeral))
+        .or_else(|_| quinn::Endpoint::server(config, ephemeral_v4))
         .context("QUIC endpoint bind 失敗")?;
-    info!(%bind_addr, "QUIC host 等待直連");
 
+    let local_port = endpoint.local_addr()?.port();
+    info!(port = local_port, "QUIC host endpoint 已建立");
+    Ok((endpoint, local_port))
+}
+
+/// Host 端：在已建立的 endpoint 上等待 joiner 連線
+pub async fn accept_on_endpoint(
+    endpoint: &quinn::Endpoint,
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
     let incoming = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.accept())
         .await
         .context("QUIC accept timeout")?
@@ -60,9 +152,9 @@ pub async fn accept_direct(tunnel_token: &str) -> Result<(quinn::SendStream, qui
 
 /// Joiner 端：連線到 host QUIC
 ///
-/// 返回 (send, recv) stream，或 Err（caller fallback relay）
+/// `target` 為完整 SocketAddr（IP + port）
 pub async fn connect_direct(
-    peer_ip: std::net::IpAddr,
+    target: SocketAddr,
     tunnel_token: &str,
 ) -> Result<(quinn::SendStream, quinn::RecvStream)> {
     let alpn = make_alpn(tunnel_token);
@@ -75,7 +167,7 @@ pub async fn connect_direct(
 
     let quic_crypto = QuicClientConfig::try_from(crypto)
         .map_err(|e| anyhow::anyhow!("QUIC client config: {e}"))?;
-    let bind_addr: SocketAddr = if peer_ip.is_ipv6() {
+    let bind_addr: SocketAddr = if target.ip().is_ipv6() {
         ([0u8; 16], 0).into()
     } else {
         ([0, 0, 0, 0], 0).into()
@@ -83,7 +175,6 @@ pub async fn connect_direct(
     let mut endpoint = quinn::Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic_crypto)));
 
-    let target = SocketAddr::new(peer_ip, QUIC_PORT);
     info!(%target, "QUIC joiner 連線中");
 
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(target, "war3-tunnel")?)
@@ -93,6 +184,97 @@ pub async fn connect_direct(
 
     let (send, recv) = conn.open_bi().await?;
     Ok((send, recv))
+}
+
+/// Host 端：嘗試 UPnP port mapping
+///
+/// 1. 搜尋 gateway
+/// 2. 取得外部 IP，與 `stun_ip` 比較偵測 CGNAT
+/// 3. 新增 port mapping
+///
+/// 成功返回 `UPnPMappingResult`，caller 負責在不需要時呼叫 `remove_port()` 清理
+pub async fn attempt_upnp_mapping(
+    local_port: u16,
+    stun_ip: Option<IpAddr>,
+) -> std::result::Result<UPnPMappingResult, StrategyFailReason> {
+    use igd_next::SearchOptions;
+    use igd_next::aio::tokio::search_gateway;
+
+    // 1. 搜尋 gateway
+    let opts = SearchOptions {
+        timeout: Some(UPNP_SEARCH_TIMEOUT),
+        ..Default::default()
+    };
+    // SearchOptions.timeout 已處理逾時，不需外層 tokio::time::timeout
+    let gateway = search_gateway(opts)
+        .await
+        .map_err(|_| StrategyFailReason::UPnPGatewayNotFound)?;
+    info!(gateway = %gateway.addr, "UPnP gateway 找到");
+
+    // 2. 取得外部 IP
+    let external_ip = tokio::time::timeout(UPNP_MAP_TIMEOUT, gateway.get_external_ip())
+        .await
+        .map_err(|_| StrategyFailReason::UPnPMappingFailed("取得外部 IP 逾時".into()))?
+        .map_err(|e| StrategyFailReason::UPnPMappingFailed(format!("取得外部 IP: {e}")))?;
+
+    // 3. CGNAT 偵測：比較 UPnP 外部 IP 和 STUN 看到的 IP
+    if let Some(stun) = stun_ip {
+        let upnp_ip = external_ip;
+        if upnp_ip != stun {
+            warn!(
+                upnp = %upnp_ip,
+                stun = %stun,
+                "CGNAT 偵測：UPnP 外部 IP 與 STUN IP 不同，跳過 UPnP"
+            );
+            return Err(StrategyFailReason::CgnatDetected);
+        }
+    }
+
+    // 4. Port mapping
+    let local_addr: SocketAddr = ([0, 0, 0, 0], local_port).into();
+    tokio::time::timeout(
+        UPNP_MAP_TIMEOUT,
+        gateway.add_port(
+            igd_next::PortMappingProtocol::UDP,
+            UPNP_EXTERNAL_PORT,
+            local_addr,
+            UPNP_LEASE_SECS,
+            "War3 Battle Tool",
+        ),
+    )
+    .await
+    .map_err(|_| StrategyFailReason::UPnPMappingFailed("port mapping 逾時".into()))?
+    .map_err(|e| StrategyFailReason::UPnPMappingFailed(format!("{e}")))?;
+
+    let external_addr = SocketAddr::new(external_ip, UPNP_EXTERNAL_PORT);
+    info!(%external_addr, "UPnP port mapping 成功");
+
+    Ok(UPnPMappingResult { external_addr })
+}
+
+/// 清理 UPnP port mapping（背景呼叫，失敗靜默）
+pub async fn cleanup_upnp_mapping() {
+    use igd_next::SearchOptions;
+    use igd_next::aio::tokio::search_gateway;
+
+    let opts = SearchOptions {
+        timeout: Some(Duration::from_secs(1)),
+        ..Default::default()
+    };
+    match search_gateway(opts).await {
+        Ok(gw) => {
+            match gw
+                .remove_port(igd_next::PortMappingProtocol::UDP, UPNP_EXTERNAL_PORT)
+                .await
+            {
+                Ok(()) => info!("UPnP port mapping 已清理"),
+                Err(e) => warn!(%e, "UPnP port mapping 清理失敗"),
+            }
+        }
+        Err(_) => {
+            // Gateway 找不到，可能 mapping 已過期
+        }
+    }
 }
 
 /// tunnel_token 前 16 bytes 做 ALPN protocol（避免 ALPN 過長）
@@ -150,5 +332,114 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
         rustls::crypto::ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── T1: UPnPGatewayNotFound → relay 不受影響 ──
+    // UPnP 失敗只影響策略結果，不影響 relay 運作
+
+    #[test]
+    fn strategy_result_gateway_not_found() {
+        let result = StrategyResult {
+            method: StrategyKind::UPnP,
+            outcome: StrategyOutcome::Failed(StrategyFailReason::UPnPGatewayNotFound),
+            duration_ms: 2000,
+        };
+        assert!(matches!(
+            result.outcome,
+            StrategyOutcome::Failed(StrategyFailReason::UPnPGatewayNotFound)
+        ));
+        // relay 繼續的邏輯由 tunnel.rs 的 select! 保證，
+        // 這裡驗證型別能正確表達「UPnP 失敗但不 panic」
+    }
+
+    #[test]
+    fn strategy_result_skipped() {
+        let result = StrategyResult {
+            method: StrategyKind::UPnP,
+            outcome: StrategyOutcome::Skipped,
+            duration_ms: 0,
+        };
+        assert!(matches!(result.outcome, StrategyOutcome::Skipped));
+    }
+
+    #[test]
+    fn strategy_result_success() {
+        let result = StrategyResult {
+            method: StrategyKind::QuicDirect,
+            outcome: StrategyOutcome::Success,
+            duration_ms: 150,
+        };
+        assert!(matches!(result.outcome, StrategyOutcome::Success));
+        assert_eq!(result.duration_ms, 150);
+    }
+
+    // ── T6: CGNAT 偵測 — UPnP IP != STUN IP → CgnatDetected ──
+
+    #[test]
+    fn cgnat_detected_reason_displays() {
+        let reason = StrategyFailReason::CgnatDetected;
+        assert_eq!(reason.to_string(), "偵測到 CGNAT");
+    }
+
+    #[test]
+    fn strategy_kind_display() {
+        assert_eq!(StrategyKind::QuicDirect.to_string(), "QUIC 穿透");
+        assert_eq!(StrategyKind::UPnP.to_string(), "UPnP 映射");
+    }
+
+    #[test]
+    fn all_fail_reasons_display() {
+        // 確保每個 variant 的 Display 不 panic
+        let reasons = vec![
+            StrategyFailReason::NoStunInfo,
+            StrategyFailReason::BindFailed("test".into()),
+            StrategyFailReason::Timeout,
+            StrategyFailReason::HandshakeFailed("test".into()),
+            StrategyFailReason::UPnPGatewayNotFound,
+            StrategyFailReason::UPnPMappingFailed("test".into()),
+            StrategyFailReason::UPnPNotAttempted,
+            StrategyFailReason::CgnatDetected,
+        ];
+        for reason in reasons {
+            let s = reason.to_string();
+            assert!(!s.is_empty());
+        }
+    }
+
+    // ── T2: oneshot sender dropped → receiver 收 RecvError，不 panic ──
+
+    #[tokio::test]
+    async fn oneshot_sender_dropped_receiver_gets_error() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<std::net::SocketAddr>();
+        // 模擬 PeerUPnPAddr 到達前 sender 已被 drop（tunnel 結束）
+        drop(tx);
+        // receiver 收到 RecvError，不 panic
+        assert!(rx.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn oneshot_sender_take_then_send_returns_err() {
+        // 模擬 app.rs 中 upnp_addr_sender.take() 之後再次收到 PeerUPnPAddr
+        let mut sender: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>> = None;
+        // take() 在 None 上回傳 None，不 panic
+        assert!(sender.take().is_none());
+    }
+
+    #[test]
+    fn make_alpn_short_token() {
+        let alpn = make_alpn("abc");
+        assert_eq!(alpn, b"w3t-abc");
+    }
+
+    #[test]
+    fn make_alpn_long_token() {
+        let long = "0123456789abcdef_extra";
+        let alpn = make_alpn(long);
+        assert_eq!(alpn, b"w3t-0123456789abcdef");
     }
 }

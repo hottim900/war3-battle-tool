@@ -8,6 +8,8 @@ pub const MAX_ROOM_NAME_LEN: usize = 64;
 pub const MAX_MAP_NAME_LEN: usize = 128;
 /// GAMEINFO 封包大小上限（bytes）
 pub const MAX_GAMEINFO_LEN: usize = 1024;
+/// UPnP external_addr 長度上限
+pub const MAX_EXTERNAL_ADDR_LEN: usize = 64;
 
 // ── Client → Server ──
 
@@ -39,6 +41,13 @@ pub enum ClientMessage {
     JoinRoom { room_id: String },
     /// 延遲測量：client 送 ts，server 原封回傳
     Ping { ts: u64 },
+    /// Host UPnP port mapping 成功，通知 server 轉發給 joiner
+    UPnPMapped {
+        /// 完整 SocketAddr 字串（IP:port），≤ 64 bytes
+        external_addr: String,
+        /// 對應的 tunnel pairing token
+        tunnel_token: String,
+    },
 }
 
 // ── Server → Client ──
@@ -72,6 +81,8 @@ pub enum ServerMessage {
     StunInfo { peer_addr: String },
     /// 延遲測量：原封回傳 client 的 ts
     Pong { ts: u64 },
+    /// Host 的 UPnP mapped address，轉發給 joiner 嘗試直連
+    PeerUPnPAddr { external_addr: String },
     /// 錯誤
     Error { message: String },
 }
@@ -145,6 +156,20 @@ impl ClientMessage {
             ClientMessage::JoinRoom { room_id } => {
                 if room_id.len() > 64 {
                     return Err("room_id 超過長度限制");
+                }
+            }
+            ClientMessage::UPnPMapped {
+                external_addr,
+                tunnel_token,
+            } => {
+                if external_addr.len() > MAX_EXTERNAL_ADDR_LEN {
+                    return Err("external_addr 超過長度限制");
+                }
+                if external_addr.trim().is_empty() {
+                    return Err("external_addr 不能為空");
+                }
+                if tunnel_token.trim().is_empty() {
+                    return Err("tunnel_token 不能為空");
                 }
             }
             _ => {}
