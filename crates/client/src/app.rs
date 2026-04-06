@@ -83,6 +83,8 @@ pub struct War3App {
     /// Tunnel RTT 測量（ms），遊戲中由 tunnel bridge 更新，0 表示無 tunnel
     tunnel_latency_ms: Arc<AtomicU64>,
 
+    /// Server 觀測到的我方 IP（CGNAT 偵測用）
+    my_observed_ip: Option<std::net::IpAddr>,
     /// P2P 直連：對方 IP（從 StunInfo 接收）
     peer_addr: Option<std::net::IpAddr>,
     /// 目前遊戲傳輸路徑（relay 或 direct）
@@ -141,6 +143,7 @@ impl War3App {
             tunnel_handle: None,
             latency_ms,
             tunnel_latency_ms: Arc::new(AtomicU64::new(0)),
+            my_observed_ip: None,
             peer_addr: None,
             transport: None,
             upnp_addr_sender: None,
@@ -224,6 +227,7 @@ impl War3App {
         let event_tx = self.tunnel_event_tx.clone();
         let peer_addr = self.peer_addr.take();
         let mapped_tx = self.upnp_mapped_tx.clone();
+        let my_observed_ip = self.my_observed_ip;
 
         self.tunnel_latency_ms.store(0, Ordering::Relaxed);
         let tunnel_lat = self.tunnel_latency_ms.clone();
@@ -232,6 +236,7 @@ impl War3App {
                 server_url,
                 tunnel_token,
                 peer_addr,
+                my_observed_ip,
                 mapped_tx,
                 event_tx,
                 tunnel_lat,
@@ -397,6 +402,14 @@ impl War3App {
                 self.my_player_id = Some(player_id);
                 self.log_panel.info("註冊成功");
             }
+            ServerMessage::YourObservedAddr { ip } => match ip.parse::<std::net::IpAddr>() {
+                Ok(addr) => {
+                    self.my_observed_ip = Some(addr);
+                }
+                Err(_) => {
+                    self.log_panel.warn(format!("觀測 IP 格式錯誤: {ip}"));
+                }
+            },
             ServerMessage::PlayerUpdate { players } => {
                 self.players = players;
             }
@@ -478,6 +491,7 @@ impl War3App {
             ServerMessage::Error { message } => {
                 self.log_panel.error(format!("伺服器錯誤: {message}"));
             }
+            ServerMessage::Unknown => {}
         }
     }
 
@@ -765,11 +779,17 @@ impl Drop for War3App {
 fn is_safe_external_addr(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
-            !v4.is_loopback()
-                && !v4.is_private()
-                && !v4.is_link_local()
-                && !v4.is_broadcast()
-                && !v4.is_unspecified()
+            if v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+            {
+                return false;
+            }
+            // RFC 6598 CGNAT shared address space (100.64.0.0/10)
+            let octets = v4.octets();
+            !(octets[0] == 100 && (64..=127).contains(&octets[1]))
         }
         std::net::IpAddr::V6(v6) => {
             !v6.is_loopback()
@@ -865,6 +885,16 @@ mod tests {
     #[test]
     fn ssrf_rejects_ipv4_unspecified() {
         assert!(!is_safe_external_addr("0.0.0.0".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn ssrf_rejects_cgnat_ipv4() {
+        assert!(!is_safe_external_addr(
+            "100.64.1.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!is_safe_external_addr(
+            "100.127.255.255".parse::<IpAddr>().unwrap()
+        ));
     }
 
     #[test]

@@ -415,6 +415,7 @@ pub async fn run_host_tunnel(
     server_url: String,
     tunnel_token: String,
     _peer_addr: Option<IpAddr>,
+    my_observed_ip: Option<IpAddr>,
     upnp_mapped_tx: mpsc::UnboundedSender<(String, SocketAddr)>,
     event_tx: mpsc::UnboundedSender<TunnelEvent>,
     latency_ms: Arc<AtomicU64>,
@@ -456,9 +457,7 @@ pub async fn run_host_tunnel(
     {
         info!(%token_short, "背景嘗試 QUIC host 監聽 + UPnP");
         let token = tunnel_token.clone();
-        // CGNAT 偵測需要 host 自己的 STUN IP（server 目前只傳 peer 的 IP）
-        // peer_addr 是對方的 IP，不能用來比較，暫時傳 None 跳過 CGNAT 偵測
-        let stun_ip = None::<IpAddr>;
+        let stun_ip = my_observed_ip;
         let mapped_tx = upnp_mapped_tx;
         let etx = event_tx.clone();
         tokio::spawn(background_quic_host(

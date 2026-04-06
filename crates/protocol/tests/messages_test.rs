@@ -258,6 +258,12 @@ fn server_message_serde_roundtrip() {
         ServerMessage::TunnelReady {
             tunnel_token: "token-ready".into(),
         },
+        ServerMessage::YourObservedAddr {
+            ip: "1.2.3.4".into(),
+        },
+        ServerMessage::PeerUPnPAddr {
+            external_addr: "5.6.7.8:19870".into(),
+        },
         ServerMessage::Error {
             message: "err".into(),
         },
@@ -268,6 +274,16 @@ fn server_message_serde_roundtrip() {
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
     }
+}
+
+// ── T15: serde(other) catch-all ──
+
+#[test]
+fn unknown_server_message_deserializes_to_unknown() {
+    // 模擬新版 server 送出舊版 client 不認識的 variant
+    let json = r#"{"type":"SomeFutureVariant","data":"hello"}"#;
+    let msg: ServerMessage = serde_json::from_str(json).unwrap();
+    assert!(matches!(msg, ServerMessage::Unknown));
 }
 
 #[test]
