@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>War3 Battle Tool - 加入房間</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}
+.card{background:#16213e;border-radius:12px;padding:32px;max-width:480px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+h1{font-size:18px;color:#8892b0;margin-bottom:24px;text-align:center}
+.status-badge{display:inline-block;padding:4px 12px;border-radius:12px;font-size:13px;font-weight:600;margin-bottom:16px}
+.badge-active{background:#10b981;color:#fff}
+.badge-waiting{background:#f59e0b;color:#1a1a2e}
+.badge-closed{background:#ef4444;color:#fff}
+.badge-offline{background:#6b7280;color:#fff}
+.room-info{text-align:center;margin:16px 0}
+.room-host{font-size:22px;font-weight:700;color:#ccd6f6}
+.room-map{font-size:15px;color:#8892b0;margin-top:4px}
+.room-players{font-size:14px;color:#64748b;margin-top:8px}
+.btn{display:block;width:100%;padding:14px;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;text-decoration:none;text-align:center;margin-top:12px;transition:opacity .15s}
+.btn-primary{background:#3b82f6;color:#fff}
+.btn-primary:hover{opacity:.85}
+.btn-secondary{background:transparent;color:#8892b0;border:1px solid #334155}
+.btn-secondary:hover{background:#1e293b}
+.spinner{display:inline-block;width:20px;height:20px;border:2px solid #334155;border-top-color:#3b82f6;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.center-text{text-align:center;padding:24px 0;color:#8892b0}
+.tooltip{position:relative;display:inline-block;width:100%}
+.tooltip .tip-text{visibility:hidden;background:#10b981;color:#fff;text-align:center;padding:4px 12px;border-radius:6px;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);font-size:13px;white-space:nowrap;opacity:0;transition:opacity .2s}
+.tooltip.show .tip-text{visibility:visible;opacity:1}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>War3 Battle Tool</h1>
+  <div id="content">
+    <div class="center-text"><span class="spinner"></span>連線中...</div>
+  </div>
+</div>
+<script>
+(function() {
+  const params = new URLSearchParams(location.search);
+  const targetRoom = params.get('room');
+  if (!targetRoom) {
+    document.getElementById('content').innerHTML =
+      '<div class="center-text">缺少房間 ID。請使用完整的分享連結。</div>';
+    return;
+  }
+
+  const WS_URL = 'wss://war3.kalthor.cc/ws';
+  const DOWNLOAD_URL = 'https://github.com/hottim900/war3-battle-tool/releases/latest';
+  const RECONNECT_DELAY = 3000;
+
+  let ws = null;
+  let reconnectTimer = null;
+  let state = 'loading'; // loading, waiting, active, closed, offline
+
+  function uuid() {
+    return crypto.randomUUID ? crypto.randomUUID() :
+      'xxxx-xxxx'.replace(/x/g, () => (Math.random()*16|0).toString(16));
+  }
+
+  function connect() {
+    if (ws) { try { ws.close(); } catch(e) {} }
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = function() {
+      clearTimeout(reconnectTimer);
+      ws.send(JSON.stringify({
+        type: 'Register',
+        nickname: '__web-viewer-' + uuid() + '__',
+        war3_version: '1.27'
+      }));
+      setState('waiting');
+    };
+
+    ws.onmessage = function(ev) {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch(e) { return; }
+
+      if (msg.type === 'RoomUpdate' && msg.rooms) {
+        const room = msg.rooms.find(r => r.room_id === targetRoom);
+        if (room) {
+          renderRoom(room);
+          setState('active');
+        } else if (state === 'active') {
+          setState('closed');
+        }
+      }
+    };
+
+    ws.onclose = function() {
+      if (state !== 'closed') {
+        setState('offline');
+        scheduleReconnect();
+      }
+    };
+
+    ws.onerror = function() {
+      // onclose will fire after onerror
+    };
+  }
+
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, RECONNECT_DELAY);
+  }
+
+  function setState(s) {
+    state = s;
+    const el = document.getElementById('content');
+    switch(s) {
+      case 'loading':
+        el.innerHTML = '<div class="center-text"><span class="spinner"></span>連線中...</div>';
+        break;
+      case 'waiting':
+        el.innerHTML = '<div class="center-text"><span class="spinner"></span>等待房間建立中...</div>';
+        break;
+      case 'active':
+        // renderRoom handles this
+        break;
+      case 'closed':
+        el.innerHTML = '<div class="center-text"><span class="status-badge badge-closed">已關閉</span><p style="margin-top:16px">房間已關閉</p></div>';
+        break;
+      case 'offline':
+        el.innerHTML = '<div class="center-text"><span class="spinner"></span>無法連線伺服器，重試中...</div>';
+        break;
+    }
+  }
+
+  function renderRoom(room) {
+    const el = document.getElementById('content');
+    const shareUrl = location.href;
+    el.innerHTML =
+      '<div style="text-align:center"><span class="status-badge badge-active">遊戲中</span></div>' +
+      '<div class="room-info">' +
+        '<div class="room-host">' + esc(room.host_nickname) + ' 的房間</div>' +
+        '<div class="room-map">' + esc(room.map_name || room.room_name) + '</div>' +
+        '<div class="room-players">' + room.current_players + ' / ' + room.max_players + ' 位玩家</div>' +
+      '</div>' +
+      '<a href="' + DOWNLOAD_URL + '" class="btn btn-primary" target="_blank" rel="noopener">下載 War3 Battle Tool</a>' +
+      '<div class="tooltip" id="copy-wrap">' +
+        '<span class="tip-text">已複製!</span>' +
+        '<button class="btn btn-secondary" onclick="copyLink()">複製分享連結</button>' +
+      '</div>';
+
+    window.copyLink = function() {
+      navigator.clipboard.writeText(shareUrl).then(function() {
+        const wrap = document.getElementById('copy-wrap');
+        wrap.classList.add('show');
+        setTimeout(function() { wrap.classList.remove('show'); }, 2000);
+      });
+    };
+  }
+
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

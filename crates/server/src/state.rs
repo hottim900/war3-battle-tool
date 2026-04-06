@@ -77,7 +77,7 @@ impl AppState {
         let player_update = ServerMessage::PlayerUpdate {
             players: players
                 .values()
-                .filter(|p| p.disconnected_at.is_none())
+                .filter(|p| p.disconnected_at.is_none() && !p.nickname.starts_with("__web-viewer-"))
                 .map(|p| PlayerInfo {
                     player_id: p.player_id.clone(),
                     nickname: p.nickname.clone(),
