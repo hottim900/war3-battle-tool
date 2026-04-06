@@ -42,7 +42,7 @@ pub struct TunnelState {
 
 struct UPnPPending {
     host_ip: IpAddr,
-    joiner_ip: IpAddr,
+    joiner_player_id: String,
     created_at: Instant,
 }
 
@@ -67,12 +67,18 @@ impl TunnelState {
     }
 
     /// 註冊 token 的 IP 綁定（ws.rs JoinRoom 時呼叫）
-    pub async fn register_token(&self, token: String, host_ip: IpAddr, joiner_ip: IpAddr) {
+    pub async fn register_token(
+        &self,
+        token: String,
+        host_ip: IpAddr,
+        joiner_ip: IpAddr,
+        joiner_player_id: String,
+    ) {
         self.upnp_pending.write().await.insert(
             token.clone(),
             UPnPPending {
                 host_ip,
-                joiner_ip,
+                joiner_player_id,
                 created_at: Instant::now(),
             },
         );
@@ -82,18 +88,20 @@ impl TunnelState {
             .insert(token, TokenBinding { host_ip, joiner_ip });
     }
 
-    /// 查詢 UPnP pending（驗證 host IP 並返回 joiner IP）
+    /// 查詢並移除 UPnP pending（驗證 host IP 並返回 joiner player_id，一次性消費防重播）
     pub async fn lookup_upnp_pending(
         &self,
         token: &str,
         claimed_host_ip: IpAddr,
-    ) -> Option<IpAddr> {
-        let pending = self.upnp_pending.read().await;
+    ) -> Option<String> {
+        let mut pending = self.upnp_pending.write().await;
         let entry = pending.get(token)?;
         if entry.host_ip != claimed_host_ip {
             return None;
         }
-        Some(entry.joiner_ip)
+        let player_id = entry.joiner_player_id.clone();
+        pending.remove(token);
+        Some(player_id)
     }
 
     /// 驗證 token 的 IP 是否匹配
@@ -411,12 +419,12 @@ mod tests {
         let joiner_ip: IpAddr = "5.6.7.8".parse().unwrap();
 
         state
-            .register_token("token-abc".into(), host_ip, joiner_ip)
+            .register_token("token-abc".into(), host_ip, joiner_ip, "joiner-001".into())
             .await;
 
-        // 正確 host IP → 拿到 joiner IP
+        // 正確 host IP → 拿到 joiner player_id
         let result = state.lookup_upnp_pending("token-abc", host_ip).await;
-        assert_eq!(result, Some(joiner_ip));
+        assert_eq!(result, Some("joiner-001".into()));
     }
 
     #[tokio::test]
@@ -427,7 +435,7 @@ mod tests {
         let attacker_ip: IpAddr = "9.9.9.9".parse().unwrap();
 
         state
-            .register_token("token-abc".into(), host_ip, joiner_ip)
+            .register_token("token-abc".into(), host_ip, joiner_ip, "joiner-001".into())
             .await;
 
         // joiner 冒充 host → None
@@ -448,25 +456,50 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    // ── T4: Duplicate UPnPMapped → idempotent ──
+    // ── T11: Remove-on-read prevents replay ──
 
     #[tokio::test]
-    async fn lookup_upnp_pending_idempotent() {
+    async fn lookup_upnp_pending_remove_on_read() {
         let state = TunnelState::new();
         let host_ip: IpAddr = "1.2.3.4".parse().unwrap();
         let joiner_ip: IpAddr = "5.6.7.8".parse().unwrap();
 
         state
-            .register_token("token-abc".into(), host_ip, joiner_ip)
+            .register_token("token-abc".into(), host_ip, joiner_ip, "joiner-001".into())
             .await;
 
-        // 多次 lookup 都返回相同結果，不 panic
+        // 第一次查詢成功並消費 token
         let r1 = state.lookup_upnp_pending("token-abc", host_ip).await;
+        assert_eq!(r1, Some("joiner-001".to_string()));
+
+        // 第二次查詢失敗（token 已被移除，防重播）
         let r2 = state.lookup_upnp_pending("token-abc", host_ip).await;
-        let r3 = state.lookup_upnp_pending("token-abc", host_ip).await;
-        assert_eq!(r1, Some(joiner_ip));
-        assert_eq!(r2, Some(joiner_ip));
-        assert_eq!(r3, Some(joiner_ip));
+        assert_eq!(r2, None);
+    }
+
+    // ── T10: Player ID matching under shared NAT ──
+
+    #[tokio::test]
+    async fn lookup_upnp_pending_shared_nat_different_player_ids() {
+        let state = TunnelState::new();
+        let host_ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let shared_ip: IpAddr = "5.6.7.8".parse().unwrap(); // 兩個 joiner 同一個 public IP
+
+        // joiner_A 和 joiner_B 來自同一個 IP 但有不同 player_id
+        state
+            .register_token("token-aaa".into(), host_ip, shared_ip, "joiner-aaa".into())
+            .await;
+        state
+            .register_token("token-bbb".into(), host_ip, shared_ip, "joiner-bbb".into())
+            .await;
+
+        // 用 token-aaa 查詢 → 拿到 joiner-aaa（不是 joiner-bbb）
+        let r1 = state.lookup_upnp_pending("token-aaa", host_ip).await;
+        assert_eq!(r1, Some("joiner-aaa".to_string()));
+
+        // 用 token-bbb 查詢 → 拿到 joiner-bbb
+        let r2 = state.lookup_upnp_pending("token-bbb", host_ip).await;
+        assert_eq!(r2, Some("joiner-bbb".to_string()));
     }
 
     // ── UPnP pending cleanup ──
@@ -482,13 +515,18 @@ mod tests {
             "expired-token".into(),
             UPnPPending {
                 host_ip,
-                joiner_ip,
+                joiner_player_id: "expired-joiner".into(),
                 created_at: Instant::now() - Duration::from_secs(11),
             },
         );
         // 插入一筆未過期的
         state
-            .register_token("fresh-token".into(), host_ip, joiner_ip)
+            .register_token(
+                "fresh-token".into(),
+                host_ip,
+                joiner_ip,
+                "fresh-joiner".into(),
+            )
             .await;
 
         assert_eq!(state.upnp_pending.read().await.len(), 2);

@@ -83,8 +83,13 @@ pub enum ServerMessage {
     Pong { ts: u64 },
     /// Host 的 UPnP mapped address，轉發給 joiner 嘗試直連
     PeerUPnPAddr { external_addr: String },
+    /// Server 觀測到的 client IP（Register 後立即送出，CGNAT 偵測用）
+    YourObservedAddr { ip: String },
     /// 錯誤
     Error { message: String },
+    /// 未知訊息（向後相容：舊版 client 收到新版 server 的未知 variant）
+    #[serde(other)]
+    Unknown,
 }
 
 /// 玩家資訊（不含 IP，IP 僅在 JoinRoom 時交換）

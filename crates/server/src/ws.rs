@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,8 @@ const MAX_MESSAGE_SIZE: usize = 4096;
 const MAX_TOTAL_PLAYERS: usize = 500;
 const MAX_TOTAL_ROOMS: usize = 200;
 const JOIN_COOLDOWN: Duration = Duration::from_secs(5);
+const WEB_VIEWER_TIMEOUT: Duration = Duration::from_secs(120);
+const WEB_VIEWER_PREFIX: &str = "__web-viewer-";
 
 struct RateLimiter {
     tokens: u32,
@@ -73,8 +75,11 @@ pub async fn handle_socket(
 
     let player_id = Uuid::new_v4().to_string();
     let mut registered = false;
+    let mut is_web_viewer = false;
     let mut rate_limiter = RateLimiter::new();
     let mut last_join_at: Option<Instant> = None;
+    let (wv_timeout_tx, wv_timeout_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut wv_timeout_tx = Some(wv_timeout_tx);
 
     let receive_loop = async {
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -135,7 +140,16 @@ pub async fn handle_socket(
                         continue;
                     }
 
-                    info!(%client_ip, %nickname, %war3_version, "玩家上線");
+                    is_web_viewer = nickname.starts_with(WEB_VIEWER_PREFIX);
+
+                    if is_web_viewer {
+                        info!(%client_ip, %nickname, "Web viewer 連線");
+                        if let Some(tx) = wv_timeout_tx.take() {
+                            let _ = tx.send(());
+                        }
+                    } else {
+                        info!(%client_ip, %nickname, %war3_version, "玩家上線");
+                    }
 
                     let player = ConnectedPlayer {
                         player_id: player_id.clone(),
@@ -159,6 +173,11 @@ pub async fn handle_socket(
                     let _ = tx.try_send(ServerMessage::Welcome {
                         player_id: player_id.clone(),
                     });
+                    if !is_web_viewer {
+                        let _ = tx.try_send(ServerMessage::YourObservedAddr {
+                            ip: client_ip.to_string(),
+                        });
+                    }
 
                     state.broadcast_state().await;
                 }
@@ -175,7 +194,7 @@ pub async fn handle_socket(
                     max_players,
                     gameinfo,
                 } => {
-                    if !registered {
+                    if !registered || is_web_viewer {
                         continue;
                     }
 
@@ -229,7 +248,7 @@ pub async fn handle_socket(
                 }
 
                 ClientMessage::CloseRoom => {
-                    if !registered {
+                    if !registered || is_web_viewer {
                         continue;
                     }
 
@@ -257,15 +276,36 @@ pub async fn handle_socket(
                     external_addr,
                     tunnel_token,
                 } => {
-                    if !registered {
+                    if !registered || is_web_viewer {
+                        continue;
+                    }
+
+                    // SSRF 防護：驗證 external_addr 非 RFC1918/loopback/link-local
+                    let parsed_addr = match external_addr.parse::<SocketAddr>() {
+                        Ok(addr) => addr,
+                        Err(_) => {
+                            warn!(
+                                %client_ip,
+                                %external_addr,
+                                "UPnPMapped: external_addr 格式錯誤"
+                            );
+                            continue;
+                        }
+                    };
+                    if !is_safe_external_addr(parsed_addr.ip()) {
+                        warn!(
+                            %client_ip,
+                            %external_addr,
+                            "UPnPMapped: external_addr 被拒絕（不安全位址）"
+                        );
                         continue;
                     }
 
                     // Auth check: 只有 host 可以送 UPnPMapped
-                    let joiner_ip = tunnel_state
+                    let joiner_player_id = tunnel_state
                         .lookup_upnp_pending(&tunnel_token, client_ip)
                         .await;
-                    let Some(joiner_ip) = joiner_ip else {
+                    let Some(joiner_player_id) = joiner_player_id else {
                         warn!(
                             %client_ip,
                             token = tunnel_token.get(..8).unwrap_or(&tunnel_token),
@@ -277,7 +317,7 @@ pub async fn handle_socket(
                     // 找到 joiner 的 tx channel，unicast PeerUPnPAddr
                     let players = state.players.read().await;
                     let sent = players.values().any(|p| {
-                        if p.client_ip == joiner_ip && p.disconnected_at.is_none() {
+                        if p.player_id == joiner_player_id && p.disconnected_at.is_none() {
                             let _ = p.tx.try_send(ServerMessage::PeerUPnPAddr {
                                 external_addr: external_addr.clone(),
                             });
@@ -302,7 +342,7 @@ pub async fn handle_socket(
                 }
 
                 ClientMessage::JoinRoom { room_id } => {
-                    if !registered {
+                    if !registered || is_web_viewer {
                         continue;
                     }
 
@@ -363,9 +403,9 @@ pub async fn handle_socket(
 
                     let tunnel_token = Uuid::new_v4().to_string();
 
-                    // 註冊 IP-bound token
+                    // 註冊 IP-bound token（含 joiner player_id，UPnP 配對用）
                     tunnel_state
-                        .register_token(tunnel_token.clone(), host_ip, client_ip)
+                        .register_token(tunnel_token.clone(), host_ip, client_ip, player_id.clone())
                         .await;
 
                     // P2P 直連：先送 StunInfo，再送 JoinResult/PlayerJoined
@@ -431,11 +471,107 @@ pub async fn handle_socket(
             warn!(%player_id, "send task 結束");
         }
         _ = receive_loop => {}
+        _ = async {
+            // 等待 web-viewer 註冊通知，然後開始 120s 倒數
+            let _ = wv_timeout_rx.await;
+            tokio::time::sleep(WEB_VIEWER_TIMEOUT).await;
+        } => {
+            info!(%player_id, "Web viewer 超時斷線 ({}s)", WEB_VIEWER_TIMEOUT.as_secs());
+        }
     }
 
     if registered {
-        info!(%player_id, "玩家斷線，進入 grace period");
-        state.mark_disconnected(&player_id).await;
+        if is_web_viewer {
+            // Web viewer 直接移除，不走 grace period
+            state.remove_player(&player_id).await;
+        } else {
+            info!(%player_id, "玩家斷線，進入 grace period");
+            state.mark_disconnected(&player_id).await;
+        }
         state.broadcast_state().await;
+    }
+}
+
+/// SSRF 防護：拒絕 RFC1918、loopback、link-local 位址
+fn is_safe_external_addr(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+            {
+                return false;
+            }
+            // RFC 6598 CGNAT shared address space (100.64.0.0/10)
+            let octets = v4.octets();
+            !(octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        IpAddr::V6(v6) => {
+            !v6.is_loopback()
+                && !v6.is_unspecified()
+                // ULA (fc00::/7) 和 link-local (fe80::/10)
+                && !matches!(v6.segments()[0], 0xfc00..=0xfdff | 0xfe80..=0xfebf)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── T12: Server SSRF validation (IPv4) ──
+
+    #[test]
+    fn ssrf_rejects_private_ipv4() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(!is_safe_external_addr(ip));
+    }
+
+    #[test]
+    fn ssrf_rejects_loopback_ipv4() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(!is_safe_external_addr(ip));
+    }
+
+    #[test]
+    fn ssrf_rejects_link_local_ipv4() {
+        let ip: IpAddr = "169.254.1.1".parse().unwrap();
+        assert!(!is_safe_external_addr(ip));
+    }
+
+    #[test]
+    fn ssrf_rejects_cgnat_ipv4() {
+        let ip: IpAddr = "100.64.1.1".parse().unwrap();
+        assert!(!is_safe_external_addr(ip));
+        let ip: IpAddr = "100.127.255.255".parse().unwrap();
+        assert!(!is_safe_external_addr(ip));
+    }
+
+    #[test]
+    fn ssrf_accepts_public_ipv4() {
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(is_safe_external_addr(ip));
+    }
+
+    // ── T12b: Server SSRF validation (IPv6) ──
+
+    #[test]
+    fn ssrf_rejects_ipv6_loopback() {
+        let ip: IpAddr = "::1".parse().unwrap();
+        assert!(!is_safe_external_addr(ip));
+    }
+
+    #[test]
+    fn ssrf_rejects_ipv6_link_local() {
+        let ip: IpAddr = "fe80::1".parse().unwrap();
+        assert!(!is_safe_external_addr(ip));
+    }
+
+    #[test]
+    fn ssrf_accepts_public_ipv6() {
+        let ip: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(is_safe_external_addr(ip));
     }
 }

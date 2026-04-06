@@ -85,13 +85,38 @@ async fn register_and_welcome() {
 
     let msgs = drain_messages(&mut ws).await;
     assert!(
-        msgs.len() >= 3,
-        "Expected >= 3 messages, got {}",
+        msgs.len() >= 4,
+        "Expected >= 4 messages (Welcome, YourObservedAddr, PlayerUpdate, RoomUpdate), got {}",
         msgs.len()
     );
 
     let welcome = find_msg(&msgs, "Welcome").expect("No Welcome");
     assert!(welcome["player_id"].is_string());
+
+    // T9: YourObservedAddr 在 Register 後立即送出
+    let observed = find_msg(&msgs, "YourObservedAddr").expect("No YourObservedAddr");
+    assert!(observed["ip"].is_string());
+    // Server 本地測試，IP 是 127.0.0.1
+    assert_eq!(observed["ip"].as_str().unwrap(), "127.0.0.1");
+
+    // YourObservedAddr 必須在 Welcome 之後、broadcast_state 之前
+    let welcome_idx = msgs.iter().position(|m| m["type"] == "Welcome").unwrap();
+    let observed_idx = msgs
+        .iter()
+        .position(|m| m["type"] == "YourObservedAddr")
+        .unwrap();
+    let pu_idx = msgs
+        .iter()
+        .position(|m| m["type"] == "PlayerUpdate")
+        .unwrap();
+    assert!(
+        welcome_idx < observed_idx,
+        "YourObservedAddr must come after Welcome"
+    );
+    assert!(
+        observed_idx < pu_idx,
+        "YourObservedAddr must come before PlayerUpdate"
+    );
 
     let pu = find_msg(&msgs, "PlayerUpdate").expect("No PlayerUpdate");
     let players = pu["players"].as_array().unwrap();
@@ -667,5 +692,58 @@ async fn stun_info_only_unicast_to_participants() {
     assert!(
         find_msg(&bystander_msgs, "StunInfo").is_none(),
         "Bystander should NOT receive StunInfo"
+    );
+}
+
+// ── T13: Web-viewer sentinel ──
+
+#[tokio::test]
+async fn web_viewer_excluded_from_player_update() {
+    let srv = start_server().await;
+
+    // 普通玩家
+    let mut player = connect(srv.port).await;
+    send_json(
+        &mut player,
+        json!({"type": "Register", "nickname": "RealPlayer", "war3_version": "1.27"}),
+    )
+    .await;
+    drain_messages(&mut player).await;
+
+    // Web viewer 註冊，收集初始訊息
+    let mut viewer = connect(srv.port).await;
+    send_json(
+        &mut viewer,
+        json!({"type": "Register", "nickname": "__web-viewer-test123__", "war3_version": "1.27"}),
+    )
+    .await;
+    let viewer_msgs = drain_messages(&mut viewer).await;
+
+    // Web viewer 應收到 Welcome + RoomUpdate（但不收 YourObservedAddr）
+    assert!(
+        find_msg(&viewer_msgs, "Welcome").is_some(),
+        "Web viewer should receive Welcome"
+    );
+    assert!(
+        find_msg(&viewer_msgs, "YourObservedAddr").is_none(),
+        "Web viewer should NOT receive YourObservedAddr"
+    );
+    assert!(
+        find_msg(&viewer_msgs, "RoomUpdate").is_some(),
+        "Web viewer should receive RoomUpdate"
+    );
+
+    // 普通玩家收到的 PlayerUpdate 不包含 web viewer
+    let msgs = drain_messages(&mut player).await;
+    let pu = find_msg(&msgs, "PlayerUpdate").expect("No PlayerUpdate");
+    let players = pu["players"].as_array().unwrap();
+    let nicks: Vec<&str> = players
+        .iter()
+        .map(|p| p["nickname"].as_str().unwrap())
+        .collect();
+    assert!(nicks.contains(&"RealPlayer"), "Should see real player");
+    assert!(
+        !nicks.iter().any(|n| n.starts_with("__web-viewer-")),
+        "Should NOT see web viewer in PlayerUpdate"
     );
 }
