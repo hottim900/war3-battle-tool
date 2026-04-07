@@ -1,0 +1,118 @@
+name: "缺陷回報 (Defect)"
+description: "記錄非預期的錯誤 — 寫入時就是錯的"
+labels: ["type:defect"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > 定義與分類標準見 [quality/README.md](quality/README.md#分類體系)。
+        > 缺陷搜查手冊見 [quality/defect-taxonomy.md](quality/defect-taxonomy.md)。
+  - type: input
+    id: title
+    attributes:
+      label: "TL;DR"
+      description: "一句話摘要：問題是什麼、影響什麼"
+      placeholder: "catch 區塊吞沒 HTTP 錯誤，使用者看不到失敗通知"
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "優先級"
+      description: "何時修？定義見 README"
+      options:
+        - "Critical — 立即處理（同日）"
+        - "High — 下個 Sprint（1-2 週）"
+        - "Medium — 規劃中（1 個月）"
+        - "Low — 有空時處理"
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: "嚴重度"
+      description: "技術影響多大？"
+      options:
+        - "S1-Critical — 系統不可用或資料遺失"
+        - "S2-Major — 功能異常，無 workaround"
+        - "S3-Minor — 功能異常，有 workaround"
+        - "S4-Trivial — 外觀/文字問題"
+    validations:
+      required: true
+  - type: dropdown
+    id: cost
+    attributes:
+      label: "預估成本"
+      options:
+        - "S — < 2 小時"
+        - "M — 2 小時 ~ 1 天"
+        - "L — 1 ~ 3 天"
+        - "XL — > 3 天"
+  - type: dropdown
+    id: root-cause
+    attributes:
+      label: "根因類別"
+      options:
+        - "Design Defect — 架構/設計錯誤"
+        - "Implementation Error — 實作與設計不符"
+        - "Configuration Omission — 配置遺漏"
+        - "Framework Limitation — 框架限制未規避"
+        - "Missing Test Coverage — 缺少測試覆蓋"
+  - type: dropdown
+    id: escape-stage
+    attributes:
+      label: "逃逸階段"
+      description: "在哪個階段漏掉的？"
+      options:
+        - "Code Review"
+        - "Unit Test"
+        - "Integration Test"
+        - "E2E Test"
+        - "Production"
+  - type: dropdown
+    id: discovery-method
+    attributes:
+      label: "發現方式"
+      description: "如何發現此問題？使用品質系統的搜查或 ET 流程時填寫，否則留空。"
+      options:
+        - "taxonomy-sweep — 搜查手冊掃查"
+        - "et-session — 探索式測試"
+        - "code-review — Code review"
+        - "production — 生產環境"
+    validations:
+      required: false
+  - type: input
+    id: defect-category
+    attributes:
+      label: "缺陷子類別"
+      description: "對應 defect-taxonomy.md 的類別代碼"
+      placeholder: "D-SILENT / D-VALID / D-AUTH / D-TYPE / D-PERF / D-EDGE"
+  - type: textarea
+    id: current-state
+    attributes:
+      label: "現狀描述"
+      description: "詳細描述問題，含程式碼片段"
+    validations:
+      required: true
+  - type: textarea
+    id: affected-files
+    attributes:
+      label: "受影響檔案"
+      description: "列出相關檔案和具體問題"
+      placeholder: |
+        | 檔案 | 問題 |
+        | ---- | ---- |
+        | `src/api.ts` (L42) | catch 區塊只有 console.log |
+  - type: textarea
+    id: solution
+    attributes:
+      label: "解決方案"
+      description: "修復計畫（可分 Phase）"
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: "驗收標準"
+      description: "怎麼確認修好了？"
+      placeholder: |
+        - [ ] 錯誤正確傳遞給 UI
+        - [ ] 測試通過
