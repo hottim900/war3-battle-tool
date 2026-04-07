@@ -63,6 +63,13 @@ cargo build --release --package war3-client  # Windows only
 - master 有 branch protection（CI check 必須通過）
 - 開 feature branch → PR → CI 綠燈 → squash merge
 
+## 品質管理
+
+品質搜查手冊在 `quality/defect-taxonomy.md`。**操作前必須載入 `/quality` skill。**
+修復 bug 時，用 `gh issue list --label "type:defect"` 檢查是否有對應的品質追蹤 Issue。
+修復後嚴格執行 `/quality` skill 中的「完成步驟」。
+品質系統包含兩層發現機制：搜查手冊（grep 搜查已知模式）和探索式測試（ET session 探索 grep 盲區）。
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
