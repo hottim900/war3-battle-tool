@@ -129,7 +129,7 @@ impl ClientMessage {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
             ClientMessage::Register { nickname, .. } => {
-                if nickname.len() > MAX_NICKNAME_LEN {
+                if nickname.chars().count() > MAX_NICKNAME_LEN {
                     return Err("暱稱超過長度限制");
                 }
                 if nickname.trim().is_empty() {
@@ -142,13 +142,13 @@ impl ClientMessage {
                 max_players,
                 gameinfo,
             } => {
-                if room_name.len() > MAX_ROOM_NAME_LEN {
+                if room_name.chars().count() > MAX_ROOM_NAME_LEN {
                     return Err("房間名稱超過長度限制");
                 }
                 if room_name.trim().is_empty() {
                     return Err("房間名稱不能為空");
                 }
-                if map_name.len() > MAX_MAP_NAME_LEN {
+                if map_name.chars().count() > MAX_MAP_NAME_LEN {
                     return Err("地圖名稱超過長度限制");
                 }
                 if *max_players < 2 || *max_players > 12 {
