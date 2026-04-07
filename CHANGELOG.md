@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.4] - 2026-04-07
+
+### Fixed
+- CJK 暱稱/房名/地圖名長度驗證改用字元數，中文玩家不再被誤拒（#22）
+- JoinRoom TOCTOU 競態條件：房間人數檢查與遞增合併為原子操作，避免超額加入（#21）
+
 ## [0.3.3] - 2026-04-06
 
 ### Changed
