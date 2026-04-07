@@ -2,6 +2,7 @@ pub mod lobby;
 pub mod log_panel;
 pub mod settings;
 pub mod setup_wizard;
+pub mod timeline;
 
 use eframe::egui;
 use war3_protocol::war3::War3Version;

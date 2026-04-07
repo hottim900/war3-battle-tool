@@ -7,6 +7,7 @@ use eframe::egui;
 use tokio::sync::{mpsc, oneshot};
 use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo, ServerMessage};
 
+use crate::logging::LogEntry;
 use crate::net::discovery::NetEvent;
 use crate::net::packet::{RawUdpInjector, check_room};
 use crate::net::quic::StrategyResult;
@@ -19,6 +20,12 @@ use crate::ui::setup_wizard::SetupWizard;
 enum Tab {
     Lobby,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LogTab {
+    Log,
+    Timeline,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +75,7 @@ pub struct War3App {
     wizard: Option<SetupWizard>,
     lobby: LobbyPanel,
     log_panel: LogPanel,
+    log_tab: LogTab,
 
     pending_action: Option<PendingAction>,
 
@@ -97,9 +105,13 @@ pub struct War3App {
     upnp_mapped_rx: mpsc::UnboundedReceiver<(String, SocketAddr)>,
     /// 連線策略診斷結果
     connection_diagnostics: Vec<StrategyResult>,
+
+    /// 從 UiLogLayer 接收 log entries 的 channel
+    log_rx: mpsc::UnboundedReceiver<LogEntry>,
 }
 
 impl War3App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         config: crate::config::AppConfig,
@@ -108,6 +120,7 @@ impl War3App {
         rt_handle: tokio::runtime::Handle,
         server_url: String,
         latency_ms: Arc<AtomicU64>,
+        log_rx: mpsc::UnboundedReceiver<LogEntry>,
     ) -> Self {
         setup_cjk_fonts(&cc.egui_ctx);
 
@@ -137,7 +150,7 @@ impl War3App {
         let (tunnel_event_tx, tunnel_event_rx) = mpsc::unbounded_channel();
         let (upnp_mapped_tx, upnp_mapped_rx) = mpsc::unbounded_channel();
 
-        let mut app = Self {
+        let app = Self {
             config,
             config_changed: false,
             cmd_tx,
@@ -159,6 +172,7 @@ impl War3App {
             },
             lobby: LobbyPanel::new(),
             log_panel: LogPanel::new(),
+            log_tab: LogTab::Log,
             pending_action: None,
             pending_gameinfo: None,
             injection_handle: None,
@@ -172,9 +186,10 @@ impl War3App {
             upnp_mapped_tx,
             upnp_mapped_rx,
             connection_diagnostics: Vec::new(),
+            log_rx,
         };
 
-        app.log_panel.info("War3 Battle Tool 啟動");
+        tracing::info!(verbosity = "concise", "War3 Battle Tool 啟動");
         app
     }
 
@@ -278,7 +293,7 @@ impl War3App {
         let gameinfo = match self.pending_gameinfo.take() {
             Some(gi) if !gi.is_empty() => gi,
             _ => {
-                self.log_panel.warn("沒有 GAMEINFO 可注入");
+                tracing::warn!(verbosity = "concise", "沒有 GAMEINFO 可注入");
                 return;
             }
         };
@@ -303,8 +318,10 @@ impl War3App {
         });
         self.injection_handle = Some(handle);
 
-        self.log_panel
-            .info("GAMEINFO 注入開始，請切換到 War3 區域網路畫面加入遊戲");
+        tracing::info!(
+            verbosity = "concise",
+            "GAMEINFO 注入開始，請切換到 War3 區域網路畫面加入遊戲"
+        );
     }
 
     fn process_network_events(&mut self) {
@@ -313,7 +330,7 @@ impl War3App {
                 NetEvent::Connected => {
                     self.connection_state = ConnectionState::Connected;
                     self.ever_connected = true;
-                    self.log_panel.info("已連線到發現伺服器");
+                    tracing::info!(verbosity = "concise", "已連線到發現伺服器");
 
                     if !self.is_registered() && self.config.is_configured() {
                         self.send_register();
@@ -322,12 +339,11 @@ impl War3App {
                 NetEvent::Disconnected => {
                     self.connection_state = ConnectionState::Disconnected;
                     self.my_player_id = None;
-                    self.log_panel.warn("與伺服器的連線中斷");
+                    tracing::warn!(verbosity = "concise", "與伺服器的連線中斷");
                 }
                 NetEvent::Reconnecting { attempt } => {
                     self.connection_state = ConnectionState::Reconnecting { attempt };
-                    self.log_panel
-                        .info(format!("正在重新連線... (第 {attempt} 次)"));
+                    tracing::info!(verbosity = "concise", "正在重新連線... (第 {attempt} 次)");
                 }
                 NetEvent::ServerMessage(msg) => self.handle_server_message(msg),
             }
@@ -345,19 +361,23 @@ impl War3App {
         while let Ok(event) = self.tunnel_event_rx.try_recv() {
             match event {
                 TunnelEvent::ProxyReady => {
-                    self.log_panel.info("Tunnel proxy 就緒");
+                    tracing::info!(verbosity = "concise", "Tunnel proxy 就緒");
                     self.start_gameinfo_injection();
                 }
                 TunnelEvent::TransportSelected(t) => {
                     self.transport = Some(t);
                     match t {
-                        Transport::Direct => self.log_panel.info("傳輸: P2P 直連"),
-                        Transport::Relay => self.log_panel.info("傳輸: Relay 中繼"),
+                        Transport::Direct => {
+                            tracing::info!(verbosity = "concise", "傳輸: P2P 直連")
+                        }
+                        Transport::Relay => {
+                            tracing::info!(verbosity = "concise", "傳輸: Relay 中繼")
+                        }
                     }
                 }
                 TunnelEvent::TransportUpgraded => {
                     self.transport = Some(Transport::Direct);
-                    self.log_panel.info("傳輸升級: Relay → P2P 直連");
+                    tracing::info!(verbosity = "concise", "傳輸升級: Relay → P2P 直連");
                 }
                 TunnelEvent::Finished { error: None } => {
                     if let Some(h) = self.injection_handle.take() {
@@ -366,7 +386,7 @@ impl War3App {
                     self.tunnel_handle = None;
                     self.transport = None;
                     self.tunnel_latency_ms.store(0, Ordering::Relaxed);
-                    self.log_panel.info("Tunnel 連線結束");
+                    tracing::info!(verbosity = "concise", "Tunnel 連線結束");
                 }
                 TunnelEvent::Finished { error: Some(e) } => {
                     if let Some(h) = self.injection_handle.take() {
@@ -375,7 +395,7 @@ impl War3App {
                     self.tunnel_handle = None;
                     self.transport = None;
                     self.tunnel_latency_ms.store(0, Ordering::Relaxed);
-                    self.log_panel.error(format!("Tunnel 錯誤: {e}"));
+                    tracing::error!(verbosity = "concise", "Tunnel 錯誤: {e}");
                 }
                 TunnelEvent::StrategyResults(results) => {
                     for r in &results {
@@ -388,10 +408,13 @@ impl War3App {
                             }
                             crate::net::quic::StrategyOutcome::Skipped => "跳過".to_string(),
                         };
-                        self.log_panel.info(format!(
+                        tracing::info!(
+                            verbosity = "detailed",
                             "策略 {}: {} ({}ms)",
-                            r.method, status, r.duration_ms
-                        ));
+                            r.method,
+                            status,
+                            r.duration_ms
+                        );
                     }
                     self.connection_diagnostics = results;
                 }
@@ -403,8 +426,10 @@ impl War3App {
                 } => {
                     if gameinfo.is_empty() {
                         self.pending_action = None;
-                        self.log_panel
-                            .error("請先在 War3 中建立遊戲，再回來建立房間");
+                        tracing::error!(
+                            verbosity = "concise",
+                            "請先在 War3 中建立遊戲，再回來建立房間"
+                        );
                     } else {
                         let _ = self.cmd_tx.send(ClientMessage::CreateRoom {
                             room_name,
@@ -422,14 +447,14 @@ impl War3App {
         match msg {
             ServerMessage::Welcome { player_id } => {
                 self.my_player_id = Some(player_id);
-                self.log_panel.info("註冊成功");
+                tracing::info!(verbosity = "concise", "註冊成功");
             }
             ServerMessage::YourObservedAddr { ip } => match ip.parse::<std::net::IpAddr>() {
                 Ok(addr) => {
                     self.my_observed_ip = Some(addr);
                 }
                 Err(_) => {
-                    self.log_panel.warn(format!("觀測 IP 格式錯誤: {ip}"));
+                    tracing::warn!(verbosity = "detailed", "觀測 IP 格式錯誤: {ip}");
                 }
             },
             ServerMessage::PlayerUpdate { players } => {
@@ -453,57 +478,70 @@ impl War3App {
                 if success {
                     self.pending_action = Some(PendingAction::JoinSuccess);
                     if let (Some(token), Some(gi)) = (tunnel_token, gameinfo) {
-                        self.log_panel.info("加入成功！正在建立 tunnel 連線...");
+                        tracing::info!(verbosity = "concise", "加入成功！正在建立 tunnel 連線...");
                         self.start_joiner_tunnel(token, gi);
                     } else {
-                        self.log_panel.warn("加入成功但缺少 tunnel 資訊");
+                        tracing::warn!(verbosity = "concise", "加入成功但缺少 tunnel 資訊");
                     }
                 } else {
                     self.pending_action = Some(PendingAction::JoinFailed {
                         reason: "房間可能已關閉".to_string(),
                     });
-                    self.log_panel.error("加入失敗，房間可能已關閉。");
+                    tracing::error!(verbosity = "concise", "加入失敗，房間可能已關閉");
                 }
             }
             ServerMessage::PlayerJoined {
                 nickname,
                 tunnel_token,
             } => {
-                self.log_panel
-                    .info(format!("玩家 {nickname} 加入，建立 tunnel..."));
+                tracing::info!(
+                    verbosity = "concise",
+                    "玩家 {nickname} 加入，建立 tunnel..."
+                );
                 self.start_host_tunnel(tunnel_token);
             }
             ServerMessage::TunnelReady { tunnel_token } => {
-                self.log_panel.info("Tunnel 就緒，建立連線...");
+                tracing::info!(verbosity = "concise", "Tunnel 就緒，建立連線...");
                 self.start_host_tunnel(tunnel_token);
             }
             ServerMessage::StunInfo { peer_addr } => {
                 if let Ok(ip) = peer_addr.parse::<std::net::IpAddr>() {
                     self.peer_addr = Some(ip);
-                    self.log_panel.info("收到 P2P 直連資訊");
+                    tracing::info!(verbosity = "detailed", "收到 P2P 直連資訊");
                 }
             }
             ServerMessage::PeerUPnPAddr { external_addr } => {
                 // SSRF check：parse 並拒絕 RFC1918/loopback/link-local
                 match external_addr.parse::<SocketAddr>() {
                     Ok(addr) if is_safe_external_addr(addr.ip()) => {
-                        self.log_panel.info(format!("收到 UPnP 直連位址: {addr}"));
+                        tracing::info!(verbosity = "detailed", "收到 UPnP 直連位址: {addr}");
                         // 送給當前 tunnel task（只有一個 active joiner）
                         if let Some(sender) = self.upnp_addr_sender.take() {
                             if sender.send(addr).is_err() {
-                                self.log_panel.warn("UPnP 位址收到但 tunnel 已結束");
+                                tracing::warn!(
+                                    verbosity = "detailed",
+                                    "UPnP 位址收到但 tunnel 已結束"
+                                );
                             }
                         } else {
-                            self.log_panel.warn("UPnP 位址收到但無 tunnel 等待接收");
+                            tracing::warn!(
+                                verbosity = "detailed",
+                                "UPnP 位址收到但無 tunnel 等待接收"
+                            );
                         }
                     }
                     Ok(addr) => {
-                        self.log_panel
-                            .warn(format!("UPnP 位址被拒絕（不安全位址）: {}", addr.ip()));
+                        tracing::warn!(
+                            verbosity = "detailed",
+                            "UPnP 位址被拒絕（不安全位址）: {}",
+                            addr.ip()
+                        );
                     }
                     Err(_) => {
-                        self.log_panel
-                            .warn(format!("UPnP 位址格式錯誤: {external_addr}"));
+                        tracing::warn!(
+                            verbosity = "detailed",
+                            "UPnP 位址格式錯誤: {external_addr}"
+                        );
                     }
                 }
             }
@@ -511,7 +549,7 @@ impl War3App {
                 // 已在 discovery.rs 處理，不會到這裡
             }
             ServerMessage::Error { message } => {
-                self.log_panel.error(format!("伺服器錯誤: {message}"));
+                tracing::error!(verbosity = "concise", "伺服器錯誤: {message}");
             }
             ServerMessage::Unknown => {}
         }
@@ -660,6 +698,14 @@ impl War3App {
 
 impl eframe::App for War3App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 從 UiLogLayer channel drain log entries 到 LogPanel（每幀最多 500 筆）
+        for _ in 0..500 {
+            match self.log_rx.try_recv() {
+                Ok(entry) => self.log_panel.push(entry),
+                Err(_) => break,
+            }
+        }
+
         self.process_network_events();
 
         // 首次設定精靈
@@ -692,25 +738,46 @@ impl eframe::App for War3App {
         });
 
         // 日誌面板固定在底部（大廳和設定頁都可見）
+        let has_tunnel = self.transport.is_some() || !self.connection_diagnostics.is_empty();
         egui::TopBottomPanel::bottom("log_panel")
             .resizable(true)
             .default_height(120.0)
             .min_height(60.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("日誌")
-                            .size(13.0)
-                            .color(egui::Color32::from_rgb(0x88, 0x92, 0xb0)),
+                    // Tab 切換：日誌 / 連線歷程
+                    ui.selectable_value(
+                        &mut self.log_tab,
+                        LogTab::Log,
+                        egui::RichText::new("日誌").size(13.0),
                     );
+                    let timeline_label = if has_tunnel {
+                        egui::RichText::new("● 連線歷程")
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(0x64, 0xd8, 0x9a))
+                    } else {
+                        egui::RichText::new("連線歷程").size(13.0)
+                    };
+                    ui.selectable_value(&mut self.log_tab, LogTab::Timeline, timeline_label);
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("清除").clicked() {
+                        if self.log_tab == LogTab::Log && ui.small_button("清除").clicked() {
                             self.log_panel.clear();
                         }
                     });
                 });
-                ui.separator();
-                self.log_panel.show(ui);
+
+                match self.log_tab {
+                    LogTab::Log => self.log_panel.show(ui),
+                    LogTab::Timeline => {
+                        crate::ui::timeline::TimelinePanel::show(
+                            ui,
+                            &self.connection_diagnostics,
+                            self.transport,
+                            self.tunnel_latency_ms.load(Ordering::Relaxed),
+                        );
+                    }
+                }
             });
 
         let is_hosting = self.is_hosting();

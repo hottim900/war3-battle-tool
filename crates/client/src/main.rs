@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod logging;
 mod net;
 mod ui;
 
@@ -7,9 +8,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use tokio::sync::mpsc;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
 
 use app::War3App;
 use config::AppConfig;
+use logging::UiLogLayer;
 use net::discovery::{self, NetEvent};
 use war3_protocol::messages::ClientMessage;
 
@@ -19,12 +23,32 @@ fn main() {
         .install_default()
         .expect("無法安裝 rustls crypto provider");
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "war3_client=info".parse().unwrap()),
+    // ── Logging 設定（channel 必須在 registry.init() 之前建立）──
+    let (log_tx, log_rx) = mpsc::unbounded_channel();
+    let ui_layer = UiLogLayer::new(log_tx);
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "war3_client=info".parse().unwrap());
+
+    // File layer：寫入 {data_dir}/war3-battle-tool/logs/war3-{timestamp}.log
+    // Option<L> 自動實作 Layer，None 時等於不加
+    let file_layer = setup_file_writer().map(|writer| {
+        tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+    });
+
+    // env_filter 只套用在 terminal fmt layer，UI 和 file layer 接收所有 war3_client events
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_filter(env_filter),
         )
-        .init();
+        .with(ui_layer)
+        .with(file_layer);
+
+    tracing::subscriber::set_global_default(subscriber).expect("無法設定 tracing subscriber");
 
     let config = AppConfig::load();
     let server_url = config.server_url.clone();
@@ -58,9 +82,60 @@ fn main() {
         native_options,
         Box::new(move |cc| {
             Ok(Box::new(War3App::new(
-                cc, config, cmd_tx, event_rx, rt_handle, server_url, latency_ms,
+                cc, config, cmd_tx, event_rx, rt_handle, server_url, latency_ms, log_rx,
             )))
         }),
     )
     .expect("eframe 啟動失敗");
+}
+
+/// 建立 log 檔案 writer，回傳 None 表示 log 目錄/檔案建立失敗（程式繼續運行）。
+fn setup_file_writer() -> Option<std::sync::Mutex<std::fs::File>> {
+    let log_dir = dirs::data_dir()?.join("war3-battle-tool").join("logs");
+
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("無法建立 log 目錄 {}: {e}", log_dir.display());
+        return None;
+    }
+
+    // 清理舊 log：保留最近 30 個
+    cleanup_old_logs(&log_dir, 30);
+
+    // 建立 session log 檔案：war3-2026-04-07T12-30-01.log
+    let now = chrono::Local::now();
+    let filename = format!("war3-{}.log", now.format("%Y-%m-%dT%H-%M-%S"));
+    let filepath = log_dir.join(&filename);
+
+    match std::fs::File::create(&filepath) {
+        Ok(f) => Some(std::sync::Mutex::new(f)),
+        Err(e) => {
+            eprintln!("無法建立 log 檔案 {}: {e}", filepath.display());
+            None
+        }
+    }
+}
+
+/// 保留 log 目錄中最新的 `keep` 個 .log 檔案，刪除其餘。
+fn cleanup_old_logs(log_dir: &std::path::Path, keep: usize) {
+    let mut logs: Vec<_> = std::fs::read_dir(log_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+        .filter_map(|e| {
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((modified, e.path()))
+        })
+        .collect();
+
+    if logs.len() <= keep {
+        return;
+    }
+
+    // 按修改時間排序（新的在後）
+    logs.sort_by_key(|(t, _)| *t);
+
+    for (_, path) in &logs[..logs.len() - keep] {
+        let _ = std::fs::remove_file(path);
+    }
 }
