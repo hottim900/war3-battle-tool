@@ -355,19 +355,15 @@ pub async fn handle_socket(
                         continue;
                     }
 
+                    // Step 1: Read room metadata (full check deferred to atomic write)
                     let room_data = {
                         let rooms = state.rooms.read().await;
-                        rooms.get(&room_id).map(|r| {
-                            (
-                                r.host_player_id.clone(),
-                                r.war3_version,
-                                r.current_players >= r.max_players,
-                                r.gameinfo.clone(),
-                            )
-                        })
+                        rooms
+                            .get(&room_id)
+                            .map(|r| (r.host_player_id.clone(), r.war3_version, r.gameinfo.clone()))
                     };
 
-                    let (host_player_id, room_version, room_full, gameinfo) = match room_data {
+                    let (host_player_id, room_version, gameinfo) = match room_data {
                         Some(data) => data,
                         None => {
                             let _ = tx.try_send(ServerMessage::join_failure());
@@ -375,45 +371,61 @@ pub async fn handle_socket(
                         }
                     };
 
-                    let players = state.players.read().await;
+                    // Step 2: Read player data (extract what we need before lock release)
+                    let (joiner_nickname, host_ip, host_tx) = {
+                        let players = state.players.read().await;
 
-                    let joiner = match players.get(&player_id) {
-                        Some(p) => p,
-                        None => continue,
-                    };
+                        let joiner = match players.get(&player_id) {
+                            Some(p) => p,
+                            None => continue,
+                        };
 
-                    if joiner.war3_version != room_version {
-                        let _ = tx.try_send(ServerMessage::join_failure());
-                        continue;
-                    }
-
-                    if room_full {
-                        let _ = tx.try_send(ServerMessage::join_failure());
-                        continue;
-                    }
-
-                    let host = match players.get(&host_player_id) {
-                        Some(p) if p.disconnected_at.is_none() => p,
-                        _ => {
+                        if joiner.war3_version != room_version {
                             let _ = tx.try_send(ServerMessage::join_failure());
                             continue;
                         }
-                    };
-                    let host_ip = host.client_ip;
 
+                        let host = match players.get(&host_player_id) {
+                            Some(p) if p.disconnected_at.is_none() => p,
+                            _ => {
+                                let _ = tx.try_send(ServerMessage::join_failure());
+                                continue;
+                            }
+                        };
+
+                        (joiner.nickname.clone(), host.client_ip, host.tx.clone())
+                    };
+
+                    // Step 3: Atomic check-and-increment（消除 TOCTOU 競態）
+                    let joined = {
+                        let mut rooms = state.rooms.write().await;
+                        if let Some(room) = rooms.get_mut(&room_id) {
+                            if room.current_players >= room.max_players {
+                                false
+                            } else {
+                                room.current_players = room.current_players.saturating_add(1);
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                    if !joined {
+                        let _ = tx.try_send(ServerMessage::join_failure());
+                        continue;
+                    }
+
+                    // Step 4: Slot reserved — register tunnel + send messages
                     let tunnel_token = Uuid::new_v4().to_string();
 
-                    // 註冊 IP-bound token（含 joiner player_id，UPnP 配對用）
                     tunnel_state
                         .register_token(tunnel_token.clone(), host_ip, client_ip, player_id.clone())
                         .await;
 
-                    // P2P 直連：先送 StunInfo，再送 JoinResult/PlayerJoined
-                    // 確保 client 啟動 tunnel 時已知道 peer_addr
                     let _ = tx.try_send(ServerMessage::StunInfo {
                         peer_addr: host_ip.to_string(),
                     });
-                    let _ = host.tx.try_send(ServerMessage::StunInfo {
+                    let _ = host_tx.try_send(ServerMessage::StunInfo {
                         peer_addr: client_ip.to_string(),
                     });
 
@@ -428,34 +440,24 @@ pub async fn handle_socket(
                         },
                     });
 
-                    let joiner_nickname = joiner.nickname.clone();
-
-                    let _ = host.tx.try_send(ServerMessage::PlayerJoined {
+                    let _ = host_tx.try_send(ServerMessage::PlayerJoined {
                         nickname: joiner_nickname,
                         tunnel_token: tunnel_token.clone(),
                     });
 
-                    drop(players);
-
-                    // 先寫 joined_room（清舊房 + 設新房），再 increment room count
-                    // 順序確保 remove_player 能正確 decrement
-                    {
+                    // Step 5: Update player state (handle old room)
+                    let old_room = {
                         let mut players = state.players.write().await;
                         if let Some(player) = players.get_mut(&player_id) {
-                            let old_room = player.joined_room.replace(room_id.clone());
-                            // 離開舊房間：decrement count
-                            if let Some(old_id) = old_room {
-                                drop(players);
-                                if let Some(room) = state.rooms.write().await.get_mut(&old_id) {
-                                    room.current_players = room.current_players.saturating_sub(1);
-                                }
-                            } else {
-                                drop(players);
-                            }
+                            player.joined_room.replace(room_id.clone())
+                        } else {
+                            None
                         }
-                    }
-                    if let Some(room) = state.rooms.write().await.get_mut(&room_id) {
-                        room.current_players = room.current_players.saturating_add(1);
+                    };
+                    if let Some(old_id) = old_room
+                        && let Some(room) = state.rooms.write().await.get_mut(&old_id)
+                    {
+                        room.current_players = room.current_players.saturating_sub(1);
                     }
 
                     last_join_at = Some(Instant::now());

@@ -63,6 +63,42 @@ fn register_cjk_nickname() {
     assert!(msg.validate().is_ok());
 }
 
+#[test]
+fn register_cjk_nickname_at_limit() {
+    // 32 個中文字 = 96 bytes，但只有 32 chars，應該通過
+    let nickname: String = "測".repeat(MAX_NICKNAME_LEN);
+    assert_eq!(nickname.chars().count(), MAX_NICKNAME_LEN);
+    let msg = ClientMessage::Register {
+        nickname,
+        war3_version: War3Version::V127,
+        client_version: None,
+    };
+    assert!(msg.validate().is_ok());
+}
+
+#[test]
+fn register_cjk_nickname_over_limit() {
+    let nickname: String = "測".repeat(MAX_NICKNAME_LEN + 1);
+    let msg = ClientMessage::Register {
+        nickname,
+        war3_version: War3Version::V127,
+        client_version: None,
+    };
+    assert!(msg.validate().is_err());
+}
+
+#[test]
+fn create_room_cjk_name_at_limit() {
+    let room_name: String = "房".repeat(MAX_ROOM_NAME_LEN);
+    let msg = ClientMessage::CreateRoom {
+        room_name,
+        map_name: "LT".into(),
+        max_players: 4,
+        gameinfo: Vec::new(),
+    };
+    assert!(msg.validate().is_ok());
+}
+
 // ── validate: CreateRoom ──
 
 #[test]
