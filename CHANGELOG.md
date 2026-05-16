@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-05-17
+
+### Security
+- Server WebSocket `/ws` 與 `/tunnel` 加 RFC 6454 strict Origin allowlist 驗證：瀏覽器來源限定 `war3.kalthor.cc` 與 localhost 變體，native War3 client 不送 Origin → 不受影響。Validate-before-acquire 保證 hostile Origin 不會佔 per-IP 連線 slot（#34）
+
+### Upgrade notes
+- **自架 server 用自家 domain 的 deployer 必須設 `WAR3_ALLOWED_ORIGINS`** env var。預設只接受 `war3.kalthor.cc`、`localhost`、`127.0.0.1`、`[::1]` 的瀏覽器來源；其他 domain 的 browser-origin 連線會被 403 拒絕。範例：`WAR3_ALLOWED_ORIGINS=https://my-war3.example.com ./war3-server`。完整指引見 [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md)
+- Native War3 client（Windows exe）不送 Origin header → 不受影響，繼續連線
+
+### For contributors
+- Client `mpsc::UnboundedSender<ClientMessage>` 包成 `CmdSender` newtype，型別系統強制所有 cmd 走 `send_or_warn`（含 logging + `#[must_use]`），消除未來 call site 直接 `.send()` 繞過 logging 的 regression 風險（#23 silent-drop 第三層防線、#32）
+  - **Migration**：`try_send_cmd(&self.cmd_tx, msg, label)` → `self.cmd_tx.send_or_warn(msg, label)`，message format 完全相同（`"{label} 未送出：背景任務已中斷（...）"`），UX 不變
+- 新增 [`quality/backlog-audit.md`](quality/backlog-audit.md) staleness review 協議：machine-parseable `<!-- audit-v1 -->` 格式 + `decision: keep-open | close-as-obsolete | close-as-superseded` enum + escalation 規則（連續兩次無變化升級 close）。每個 minor release cycle 對 deferred issues 跑一輪審查
+- Workspace `version.workspace` 改為 `0.4.1`（先前 `[workspace.package].version` 停在 `0.1.0` 導致 client binary 自報版本錯誤）
+
+### Deferred (trigger 條件未滿足，audit comments 留 trail keep-until 2026-11-17)
+- #33 `AppConfig::normalize()` 擴展到 nickname/server_url/local_ip — when threat model 加入 config tampering
+- #35 `LogPanel::set_max_entries` runtime live-resize — when 使用者抱怨「重啟才生效」
+- #36 `cleanup_old_logs` N+1 防護 — when log_dir 改可指定任意路徑，或啟動慢投訴出現
+- #37 `logging.rs` 拆檔 — when file/layer 加 rotation/compression/metric，或行數 > 500
+
+### Note
+- Tag `v0.4.0` 已於 2026-04-07 由 PR #18 使用（orphan tag — release binary 仍在 GitHub Releases）。本次直接跳到 `v0.4.1`，GitHub milestone 也同步 rename。
+
 ## [0.3.6] - 2026-05-16
 
 ### Fixed
