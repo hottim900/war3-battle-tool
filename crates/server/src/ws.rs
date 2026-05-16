@@ -20,6 +20,14 @@ const JOIN_COOLDOWN: Duration = Duration::from_secs(5);
 const WEB_VIEWER_TIMEOUT: Duration = Duration::from_secs(120);
 const WEB_VIEWER_PREFIX: &str = "__web-viewer-";
 
+/// 每連線訊息頻率限制（fixed-window，1 秒重填一次）。
+///
+/// 已知行為（#25）：在 window 邊界允許短暫 2× burst——客戶端可以在 t=0.95
+/// 發 10 條（耗光 token），等到 t=1.01 重填後再發 10 條，於 0.06 秒內共 20 條。
+/// 故意保留此設計：
+/// - per-IP 連線上限 + 訊息大小 4KB + 全域玩家/房間數已防止資源耗盡
+/// - 真正的 sliding-window 或 leaky bucket 需多存 state，邊際效益不足
+/// - 用 instant.elapsed() 而非 wall clock，避開系統時鐘跳動問題
 struct RateLimiter {
     tokens: u32,
     last_refill: Instant,

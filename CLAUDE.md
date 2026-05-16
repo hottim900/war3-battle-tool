@@ -47,10 +47,13 @@ cargo build --release --package war3-client  # Windows only
 ## Server 安全模型
 
 - IP 不再交換。雙方都連 localhost，透過 tunnel relay 通訊
-- /ws: 每 IP 3 連線、每連線 10 msg/s、訊息 ≤ 4KB
+- /ws: 每 IP 10 連線、每連線 10 msg/s、訊息 ≤ 4KB
 - /tunnel: 每 IP 12 連線、per-tunnel 50 KB/s rate limit、30s pairing timeout
 - Join 冷卻 5 秒、全域 500 玩家 / 200 房間上限
 - TunnelState 與 AppState 使用獨立 RwLock，避免 lock contention
+- **CORS**：`CorsLayer::permissive()` 套在 Router 全域，主要對 `/health` 等 HTTP endpoint 生效；瀏覽器 WebSocket 升級不走 CORS preflight，安全來自無 cookie/session/CSRF（連線本身就是認證）+ 後續訊息限流。**新增任何 endpoint 前須評估**——目前的寬鬆設定是 web viewer 場景的明示選擇。
+- **/ws rate limiter**：fixed-window（每秒重填），window 邊界允許短暫 2× burst。單 IP 上限：每連線 10 msg/s × 10 連線 ≈ 100 msg/s 穩態、邊界期 200 msg/60ms。已知設計選擇；訊息大小 4KB + 全域玩家/房間上限限制 state，nginx 層另有頻寬限制。詳見 `ws.rs` `RateLimiter` doc。
+- **X-Real-IP 信任邊界**：server bind `127.0.0.1` 且僅信任 loopback 連線送來的 `X-Real-IP`。**部署不變式**：若改 bind 到 `0.0.0.0` 用於測試，必須移除 `X-Real-IP` 信任邏輯，否則任何 client 都能透過 header 偽造 IP 繞過 per-IP 限制。
 
 ## 部署
 
