@@ -54,6 +54,7 @@ cargo build --release --package war3-client  # Windows only
 - **CORS**：`CorsLayer::permissive()` 套在 Router 全域，主要對 `/health` 等 HTTP endpoint 生效；瀏覽器 WebSocket 升級不走 CORS preflight，安全來自無 cookie/session/CSRF（連線本身就是認證）+ 後續訊息限流。**新增任何 endpoint 前須評估**——目前的寬鬆設定是 web viewer 場景的明示選擇。
 - **/ws rate limiter**：fixed-window（每秒重填），window 邊界允許短暫 2× burst。單 IP 上限：每連線 10 msg/s × 10 連線 ≈ 100 msg/s 穩態、邊界期 200 msg/60ms。已知設計選擇；訊息大小 4KB + 全域玩家/房間上限限制 state，nginx 層另有頻寬限制。詳見 `ws.rs` `RateLimiter` doc。
 - **X-Real-IP 信任邊界**：server bind `127.0.0.1` 且僅信任 loopback 連線送來的 `X-Real-IP`。**部署不變式**：若改 bind 到 `0.0.0.0` 用於測試，必須移除 `X-Real-IP` 信任邏輯，否則任何 client 都能透過 header 偽造 IP 繞過 per-IP 限制。
+- **Origin allowlist (v0.4.1+)**：`/ws` 與 `/tunnel` 都會比對 `Origin` header 對 `WAR3_ALLOWED_ORIGINS` env var（預設 `https://war3.kalthor.cc` + localhost 變體）。Native War3 client 不送 Origin header → 不受影響。Validate 在 `try_acquire_connection` **之前**執行，避免 hostile Origin 佔 per-IP 連線 slot。`/health` 不套此驗證（canary / monitoring 不受影響）。Strict mode：malformed Origin / non-http(s) scheme / 有 path/query/userinfo → 403。產線/分叉部署細節見 [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md)。
 
 ## 部署
 
@@ -72,6 +73,8 @@ cargo build --release --package war3-client  # Windows only
 修復 bug 時，用 `gh issue list --label "type:defect"` 檢查是否有對應的品質追蹤 Issue。
 修復後嚴格執行 `/quality` skill 中的「完成步驟」。
 品質系統包含兩層發現機制：搜查手冊（grep 搜查已知模式）和探索式測試（ET session 探索 grep 盲區）。
+
+**Backlog audit 協議**：PR review 時刻意 deferred 的 issues（body 含「為什麼現在不做」+ `priority:low`），每個 minor release cycle 須跑一輪 staleness review，格式契約見 [`quality/backlog-audit.md`](quality/backlog-audit.md)。Audit comment 用 machine-parseable `<!-- audit-v1 -->` 標頭 + `audit-date` / `trigger-condition` / `current-status` / `decision` / `keep-until` 欄位。未來 `/autoplan` 或 `/quality` session 應 reuse 此 template，勿重新發明。
 
 ## Skill routing
 

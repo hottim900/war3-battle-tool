@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -18,6 +19,9 @@ async fn start_server() -> ServerHandle {
     let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_war3-server"))
         .env("PORT", port.to_string())
         .env("RUST_LOG", "warn")
+        // 清掉外部環境可能設的 WAR3_ALLOWED_ORIGINS，確保 tests 走預設 allowlist。
+        // 若 CI runner 或 dev shell 不小心設了非預設值，整批 origin 測試會神祕失敗。
+        .env_remove("WAR3_ALLOWED_ORIGINS")
         .kill_on_drop(true)
         .spawn()
         .expect("Failed to start server");
@@ -746,4 +750,122 @@ async fn web_viewer_excluded_from_player_update() {
         !nicks.iter().any(|n| n.starts_with("__web-viewer-")),
         "Should NOT see web viewer in PlayerUpdate"
     );
+}
+
+// ── Origin verification tests (PR-A #34) ──
+//
+// 這些測試送 raw HTTP/1.1 取得 status code，不依賴 tokio-tungstenite client
+// 自動 handshake，因為要驗證 server 在 WS upgrade 完成 *之前* 就拒絕。
+// 101 success path 仍走完整 WS upgrade（server 端會回 101 Switching Protocols）。
+
+async fn send_request_get_status(port: u16, request: &str) -> u16 {
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf).await.unwrap();
+    let resp = std::str::from_utf8(&buf[..n]).expect("non-utf8 response");
+    let status_line = resp.lines().next().expect("empty response");
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .expect("malformed status line")
+        .parse()
+        .expect("non-numeric status")
+}
+
+async fn raw_ws_request(port: u16, path: &str, origin: Option<&str>) -> u16 {
+    let mut req = format!(
+        "GET {path} HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n"
+    );
+    if let Some(o) = origin {
+        req.push_str(&format!("Origin: {o}\r\n"));
+    }
+    req.push_str("\r\n");
+    send_request_get_status(port, &req).await
+}
+
+async fn raw_http_request(port: u16, path: &str, origin: Option<&str>) -> u16 {
+    let mut req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
+    if let Some(o) = origin {
+        req.push_str(&format!("Origin: {o}\r\n"));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    send_request_get_status(port, &req).await
+}
+
+#[tokio::test]
+async fn ws_rejects_bad_origin_403() {
+    let srv = start_server().await;
+    let status = raw_ws_request(srv.port, "/ws", Some("https://evil.com")).await;
+    assert_eq!(status, 403);
+}
+
+#[tokio::test]
+async fn ws_accepts_localhost_origin_101() {
+    let srv = start_server().await;
+    let origin = format!("http://127.0.0.1:{}", srv.port);
+    let status = raw_ws_request(srv.port, "/ws", Some(&origin)).await;
+    assert_eq!(status, 101, "expected WS upgrade for allowlisted localhost");
+}
+
+#[tokio::test]
+async fn ws_accepts_no_origin_101() {
+    // Native War3 client 不送 Origin header — 必須允許
+    let srv = start_server().await;
+    let status = raw_ws_request(srv.port, "/ws", None).await;
+    assert_eq!(status, 101);
+}
+
+#[tokio::test]
+async fn ws_rejects_suffix_attack_403() {
+    let srv = start_server().await;
+    let status = raw_ws_request(srv.port, "/ws", Some("https://war3.kalthor.cc.evil.com")).await;
+    assert_eq!(status, 403);
+}
+
+#[tokio::test]
+async fn tunnel_rejects_bad_origin_403() {
+    let srv = start_server().await;
+    let status = raw_ws_request(
+        srv.port,
+        "/tunnel?token=test123&role=host",
+        Some("https://evil.com"),
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+#[tokio::test]
+async fn health_unaffected_by_bad_origin() {
+    // /health 不套 Origin 驗證 — canary / monitoring 從任何 origin 都應 200
+    let srv = start_server().await;
+    let status = raw_http_request(srv.port, "/health", Some("https://evil.com")).await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn bad_origin_does_not_leak_connection_slot() {
+    // E3 regression test: 15 個 bad-Origin requests 必須全 403。
+    // 若 validate_origin 在 try_acquire_connection 之後，第 11+ 個會 hit per-IP cap
+    // 變成 429（slot 被 leak 佔滿）。Validate-before-acquire 順序保證全 403。
+    let srv = start_server().await;
+    for i in 0..15 {
+        let status = raw_ws_request(srv.port, "/ws", Some("https://evil.com")).await;
+        assert_eq!(
+            status, 403,
+            "request {i}: expected 403 (validate-before-acquire), got {status}"
+        );
+    }
+
+    // 接著用合法 Origin 連線，slot 應仍可用
+    let origin = format!("http://127.0.0.1:{}", srv.port);
+    let status = raw_ws_request(srv.port, "/ws", Some(&origin)).await;
+    assert_eq!(status, 101, "good Origin should succeed after 15 rejected");
 }
