@@ -143,12 +143,18 @@ impl LobbyPanel {
                                             } else if room_full {
                                                 ui.add_enabled(false, egui::Button::new("已滿"));
                                             } else if ui.button("加入").clicked() {
-                                                let _ = cmd_tx.send(ClientMessage::JoinRoom {
-                                                    room_id: room.room_id.clone(),
-                                                });
-                                                action = LobbyAction::JoinRoom {
-                                                    room_name: room.room_name.clone(),
-                                                };
+                                                let sent = crate::app::try_send_cmd(
+                                                    cmd_tx,
+                                                    ClientMessage::JoinRoom {
+                                                        room_id: room.room_id.clone(),
+                                                    },
+                                                    "加入房間",
+                                                );
+                                                if sent {
+                                                    action = LobbyAction::JoinRoom {
+                                                        room_name: room.room_name.clone(),
+                                                    };
+                                                }
                                             }
 
                                             let cur = room.current_players as u32;
@@ -189,7 +195,8 @@ impl LobbyPanel {
         // 建房 / 關房按鈕
         if is_hosting {
             if ui.button("關閉房間").clicked() {
-                let _ = cmd_tx.send(ClientMessage::CloseRoom);
+                // 失敗的話 server 端房間還在但 client 已斷線，warn 已由 helper 記錄
+                let _ = crate::app::try_send_cmd(cmd_tx, ClientMessage::CloseRoom, "關閉房間");
             }
         } else {
             let create_btn = egui::Button::new("+ 建立房間")
