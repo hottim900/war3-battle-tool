@@ -535,6 +535,17 @@ impl War3App {
                 tunnel_token,
                 gameinfo,
             } => {
+                // queued JoinRoom 可能在 reconnect 後才送達 server，此時 client 端 pending 已不是
+                // Joining（已被 Disconnected handler 換成 ServerError，或使用者按確定後變 None）
+                // 略過自動 tunnel 啟動，避免「ServerError banner + 自動進遊戲」鬼影 (#44)
+                if !matches!(self.pending_action, Some(PendingAction::Joining { .. })) {
+                    tracing::warn!(
+                        verbosity = "concise",
+                        "略過過期的 JoinResult (success={success}) — 操作已取消或已超時"
+                    );
+                    return;
+                }
+
                 if success {
                     self.pending_action = Some(PendingAction::JoinSuccess);
                     if let (Some(token), Some(gi)) = (tunnel_token, gameinfo) {
