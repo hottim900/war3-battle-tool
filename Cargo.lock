@@ -4408,6 +4408,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "war3-protocol",
 ]

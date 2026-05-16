@@ -55,6 +55,10 @@ cargo build --workspace --exclude spike-packet
 cargo test --workspace --exclude spike-packet
 ```
 
+## 自架 server
+
+想用自己的 domain 跑 server？見 [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md) — 涵蓋 `WAR3_ALLOWED_ORIGINS` 語意、nginx 反向代理、TLS、與部署不變式。
+
 ## License
 
 MIT
