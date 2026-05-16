@@ -43,6 +43,7 @@
 | D-PERF   | 效能問題             | 全層          | 待搜查   |
 | D-EDGE   | 邊界條件與資源限制   | 全層          | 待搜查   |
 | D-RACE   | 競態條件與並發問題   | Server/Client | 待搜查   |
+| D-DOC    | 文件與實作不一致     | 全層          | 待搜查   |
 
 ---
 
@@ -408,6 +409,56 @@ Trigger: D-RACE 搜查完成
 
 ---
 
+## D-DOC: 文件與實作不一致
+
+### 定義
+
+CLAUDE.md、註解、PR description 等文件描述的行為與實作不符。包括：常數值過時（code 改了 doc 沒同步）、機制描述錯誤（如「CORS layer 保護 WebSocket」實際 WS 不走 CORS）、安全模型 caveat 未紀錄。
+
+對使用者的影響通常**間接**：下個維護者照文件做決策、引入新 bug 或誤判風險。
+
+### 搜查方式
+
+```bash
+# 常數值 vs 文件對齊：抓 code 內的數字 const，比對 doc 內出現的數字
+grep -rn "const MAX_\|const [A-Z_]\+: u\?\(8\|16\|32\|64\|size\) = [0-9]" . --include="*.rs" --exclude-dir=target
+# 然後在 CLAUDE.md / README.md 內查這些數字是否一致
+
+# inline 註解標示的「TODO/FIXME/XXX」是否與目前 code 一致
+grep -rn "TODO\|FIXME\|XXX\|HACK" . --include="*.rs" --include="*.md" --exclude-dir=target
+
+# 「為了 X 才這樣做」類註解：審查 X 是否還成立
+grep -rn "^[[:space:]]*//.*為了\|^[[:space:]]*//.*因為" . --include="*.rs" --exclude-dir=target
+```
+
+> **搜查策略：** 此類別的 grep 命中很多但 false positive 也多。建議 doc 改動 PR 觸發、或每季抽樣審 CLAUDE.md 內的具體數字 / 機制描述。
+
+**搜查狀態：** 待搜查
+
+### What grep can't find (Charter seed)
+
+- **misleading 措辭**：doc 寫「CORS layer 保護 WebSocket」聽起來合理但實際無效；grep 抓不到語意層級
+- **安全模型 caveat 缺漏**：例如「server bind 0.0.0.0 後 X-Real-IP 信任就是漏洞」這種部署 invariant
+- **隱含假設過時**：code 改了 protocol，但文件還在描述舊 protocol
+
+Suggested Charter:
+```
+Target: CLAUDE.md「Server 安全模型」段所述條目
+Task: 逐項驗證——找出 code 對應位置，確認數字、機制、行為皆吻合。
+  特別檢查 「per-IP 連線數」、「rate limit」、「CORS」、「X-Real-IP 信任邊界」。
+Timebox: 45 min
+Trigger: 重要 PR 修改安全相關 code 後
+```
+
+### 搜查結果
+
+**搜查範圍：** PR #30 順手對 CLAUDE.md「Server 安全模型」段做了一次手動審查
+**發現：**
+- #24/#25 已修：CORS 對 WebSocket 是 no-op 的 misleading 描述 + rate limit 真實上限未量化 + per-IP 連線數過時（3 → 10）
+- #34 新建：WebSocket Origin 驗證缺漏（從 CORS 文件化過程衍生發現）
+
+---
+
 ## 搜查執行紀錄
 
 | 日期 | 類別 | 命中數 | 發現/排除 | 備註 |
@@ -416,6 +467,8 @@ Trigger: D-RACE 搜查完成
 | 2026-04-07 | D-AUTH | ~15 | 2 發現 (#24, #25), 1 low-risk, 3 判定合理 | 首輪搜查 |
 | 2026-04-07 | D-RACE | — | 1 發現 (#21), 來自 autoplan eng review | 非 grep 搜查，autoplan 發現 |
 | 2026-04-07 | D-VALID | — | 1 發現 (#22), 來自 autoplan eng review | 非 grep 搜查，autoplan 發現 |
+| 2026-05-16 | D-DOC | — | 3 發現修復 (#24/#25 + CLAUDE.md 數字修正), 1 衍生 (#34) | PR #30 doc PR 過程手動審 |
+| 2026-05-16 | follow-up | — | 6 個 follow-up issues 建立 (#32-#37) | PR #28/29/30 review skipped items 整理 |
 
 ---
 
