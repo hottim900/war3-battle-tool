@@ -1,6 +1,7 @@
 use eframe::egui;
 use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo};
 
+use crate::cmd_sender::CmdSender;
 use crate::net::quic::{StrategyOutcome, StrategyResult};
 use crate::net::tunnel::Transport;
 
@@ -35,7 +36,7 @@ impl LobbyPanel {
         players: &[PlayerInfo],
         my_nickname: Option<&str>,
         is_hosting: bool,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<ClientMessage>,
+        cmd_tx: &CmdSender,
         latency_ms: u64,
         transport: Option<Transport>,
         diagnostics: &[StrategyResult],
@@ -143,8 +144,7 @@ impl LobbyPanel {
                                             } else if room_full {
                                                 ui.add_enabled(false, egui::Button::new("已滿"));
                                             } else if ui.button("加入").clicked() {
-                                                let sent = crate::app::try_send_cmd(
-                                                    cmd_tx,
+                                                let sent = cmd_tx.send_or_warn(
                                                     ClientMessage::JoinRoom {
                                                         room_id: room.room_id.clone(),
                                                     },
@@ -195,8 +195,8 @@ impl LobbyPanel {
         // 建房 / 關房按鈕
         if is_hosting {
             if ui.button("關閉房間").clicked() {
-                // 失敗的話 server 端房間還在但 client 已斷線，warn 已由 helper 記錄
-                let _ = crate::app::try_send_cmd(cmd_tx, ClientMessage::CloseRoom, "關閉房間");
+                // 失敗的話 server 端房間還在但 client 已斷線，warn 已由 send_or_warn 記錄
+                let _ = cmd_tx.send_or_warn(ClientMessage::CloseRoom, "關閉房間");
             }
         } else {
             let create_btn = egui::Button::new("+ 建立房間")

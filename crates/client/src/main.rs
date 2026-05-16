@@ -1,4 +1,5 @@
 mod app;
+mod cmd_sender;
 mod config;
 mod logging;
 mod net;
@@ -12,6 +13,7 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 
 use app::War3App;
+use cmd_sender::CmdSender;
 use config::AppConfig;
 use logging::UiLogLayer;
 use net::discovery::{self, NetEvent};
@@ -55,8 +57,10 @@ fn main() {
     let config = AppConfig::load();
     let server_url = config.server_url.clone();
 
-    // 建立 UI ↔ Network 通道
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ClientMessage>();
+    // 建立 UI ↔ Network 通道。CmdSender wraps the sender — UI 端只能透過
+    // send_or_warn 出 cmd，型別系統保證 logging path 不被 bypass（#32）。
+    let (raw_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ClientMessage>();
+    let cmd_tx = CmdSender::new(raw_cmd_tx);
     let (event_tx, event_rx) = mpsc::unbounded_channel::<NetEvent>();
 
     let latency_ms = Arc::new(AtomicU64::new(0));
