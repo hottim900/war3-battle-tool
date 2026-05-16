@@ -51,6 +51,17 @@ enum PendingAction {
     ServerError { message: String },
 }
 
+impl PendingAction {
+    /// Whether this action is awaiting a server response (spinner showing).
+    /// 用來判斷連線中斷/錯誤訊息進來時是否該取消當前操作。
+    fn is_in_flight(&self) -> bool {
+        matches!(
+            self,
+            PendingAction::Joining { .. } | PendingAction::CreatingRoom { .. }
+        )
+    }
+}
+
 pub struct War3App {
     config: crate::config::AppConfig,
     config_changed: bool,
@@ -340,6 +351,11 @@ impl War3App {
                 NetEvent::Connected => {
                     self.connection_state = ConnectionState::Connected;
                     self.ever_connected = true;
+                    // 重連成功後清掉斷線時設的 stale ServerError，避免「● 已連線」+
+                    // 紅 banner「中斷連線」自相矛盾
+                    if matches!(self.pending_action, Some(PendingAction::ServerError { .. })) {
+                        self.pending_action = None;
+                    }
                     tracing::info!(verbosity = "concise", "已連線到發現伺服器");
 
                     if !self.is_registered() && self.config.is_configured() {
@@ -349,30 +365,30 @@ impl War3App {
                 NetEvent::Disconnected => {
                     self.connection_state = ConnectionState::Disconnected;
                     self.my_player_id = None;
-                    // 重置斷線時的 stale state，避免「線上 N 人 + 舊房間列表」幻覺
                     self.players.clear();
                     self.rooms.clear();
-                    // 進行中的動作 (Joining/CreatingRoom) 在 transport 失敗時永遠收不到
-                    // server response，把 banner 換成失敗訊息避免 spinner 卡死
-                    if matches!(
-                        self.pending_action,
-                        Some(PendingAction::Joining { .. } | PendingAction::CreatingRoom { .. })
-                    ) {
+                    // transport 失敗時 in-flight 動作永遠收不到 response，換成錯誤
+                    // banner 避免 spinner 卡死（PR #28 修了 channel send 失敗，這裡修 ws_tx 失敗）
+                    if self
+                        .pending_action
+                        .as_ref()
+                        .is_some_and(PendingAction::is_in_flight)
+                    {
                         self.pending_action = Some(PendingAction::ServerError {
-                            message: "與伺服器斷線，操作已取消".into(),
+                            message: "與伺服器中斷連線，操作已取消".into(),
                         });
                     }
                     tracing::warn!(verbosity = "concise", "與伺服器的連線中斷");
                 }
                 NetEvent::Reconnecting { attempt } => {
                     self.connection_state = ConnectionState::Reconnecting { attempt };
-                    // 重連期間使用者若再次按鈕，同樣標記失敗
-                    if matches!(
-                        self.pending_action,
-                        Some(PendingAction::Joining { .. } | PendingAction::CreatingRoom { .. })
-                    ) {
+                    if self
+                        .pending_action
+                        .as_ref()
+                        .is_some_and(PendingAction::is_in_flight)
+                    {
                         self.pending_action = Some(PendingAction::ServerError {
-                            message: "尚未連線，操作已取消".into(),
+                            message: "與伺服器中斷連線，操作已取消".into(),
                         });
                     }
                     tracing::info!(verbosity = "concise", "正在重新連線... (第 {attempt} 次)");
@@ -594,8 +610,21 @@ impl War3App {
             }
             ServerMessage::Error { message } => {
                 tracing::error!(verbosity = "concise", "伺服器錯誤: {message}");
-                // 把 server 拒絕原因 surface 到紅色 banner，避免使用者按鈕後永遠不知道為何沒反應
-                self.pending_action = Some(PendingAction::ServerError { message });
+                // 依當前 pending 決定如何 surface：
+                // - Joining 中 → JoinFailed 保持語意（reuse「加入失敗」banner）
+                // - CreatingRoom / None → 通用 ServerError banner
+                // - JoinSuccess / 已存在的失敗訊息 → 只 log 不覆蓋（避免吃掉成功狀態或無聲蓋掉前一則錯誤）
+                match self.pending_action.take() {
+                    Some(PendingAction::Joining { .. }) => {
+                        self.pending_action = Some(PendingAction::JoinFailed { reason: message });
+                    }
+                    Some(PendingAction::CreatingRoom { .. }) | None => {
+                        self.pending_action = Some(PendingAction::ServerError { message });
+                    }
+                    Some(existing) => {
+                        self.pending_action = Some(existing);
+                    }
+                }
             }
             ServerMessage::Unknown => {}
         }
