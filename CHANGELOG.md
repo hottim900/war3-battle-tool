@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.6] - 2026-05-16
+
+### Fixed
+- 拔網路或 server 重啟瞬間按「加入」/「建立房間」不再 spinner 卡死：transport 失敗時把進行中操作換成紅色 banner「與伺服器中斷連線，操作已取消」+ 確定按鈕（#40）
+- 斷線後 lobby 不再保留 stale 玩家/房間列表，避免使用者點 stale 房間又卡 Joining（#40）
+- server 拒絕原因（暱稱超長、版本不符、房間已存在、Join 冷卻等）原本只寫進 log、UI 沒提示，現在顯示為紅 banner「錯誤：{message}」（#41）
+- 重連完成後 stale 錯誤 banner 自動消失，避免「● 已連線」+ 紅 banner「中斷連線」自相矛盾
+- queued `JoinRoom` 在 reconnect 後送達 server 不再造成「已取消 banner + 自動進遊戲」鬼影：JoinResult handler 加 state guard，pending 非 Joining 時略過 tunnel 啟動（#44）
+
+### Changed
+- 斷線取消訊息統一為「與伺服器中斷連線，操作已取消」
+- `ServerMessage::Error` 處理改為 state-aware：Joining 中 → JoinFailed banner（語意一致）；CreatingRoom / 無 pending → ServerError banner；JoinSuccess / 已存在錯誤 → 只 log 不覆蓋（避免吃掉成功狀態或無聲蓋掉前一則錯誤）
+
+### For contributors
+- `PendingAction` enum 加 `ServerError { message }` variant + `is_in_flight()` helper 消重複 `matches!`
+- 引入 AI ET pre-flight pattern：對 ET charter 先跑 AI agent code-trace static analysis，HIGH 信心發現直接開 issue 不必等人類 ET 驗證（#42、charter `quality/et-sessions/2026-05-16-*.md`）
+- 三個 fix 都經 multi-agent review（reuse + quality + efficiency / correctness + race / UX 三視角並行），P0 findings 整合進同一 PR，P0-deferred 開為 follow-up issue（#44 即是這個流程的產物）
+
 ## [0.3.5] - 2026-05-16
 
 ### Fixed
