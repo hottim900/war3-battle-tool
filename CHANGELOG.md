@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.5] - 2026-05-16
+
+### Fixed
+- 按「建立房間」/「加入」/「關閉房間」等按鈕不再有「沒反應」的情況：背景任務斷線時 client 會在 log panel 顯示 warn 並清除 pending 狀態（#23）
+
+### Added
+- 設定頁可調 log 緩衝大小 1000-5000 筆（滑桿，500 步進，重啟生效）（#20）
+
+### Changed
+- CLAUDE.md「Server 安全模型」段補完：CORS 真實覆蓋範圍（WebSocket 不走 preflight）、rate limit 真實上限（per-IP 100 msg/s 穩態、邊界期 200 msg/60ms）、X-Real-IP 信任邊界部署不變式；糾正 `/ws` 連線數從過時的 3 為 10（#24, #25）
+
+### For contributors
+- 日誌系統補齊 9 個 unit/integration test：ring buffer overflow、filter、search、file layer、log dir 失敗 fallback、buffer size clamp 等（#19）
+- `setup_file_writer` + `default_log_dir` 從 `main.rs` 移到 `logging.rs`，加 `log_dir` / `keep_files` 參數方便測試；log 檔名加毫秒精度避免同秒重啟覆寫（#19/#20）
+- `LOG_BUFFER_*` 常量從 `ui::log_panel` 移到 `config`，修正反向依賴
+- `AppConfig::normalize()` 在 load 時 clamp 並 `tracing::warn`，避免下游每次都防禦
+- 修 rust 1.95.0 `clippy::collapsible_match` 在 `protocol/messages.rs::validate()`（#31）
+- 品質系統第二輪：新增 D-DOC 類別（文件與實作不一致），寫 2 個 ET charter（network disruption、rapid input），整理 6 個 review 跳過項為 follow-up issues #32-#37（#38）
+
 ## [0.3.4] - 2026-04-07
 
 ### Fixed
