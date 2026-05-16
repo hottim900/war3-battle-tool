@@ -126,6 +126,9 @@ impl ServerMessage {
 
 impl ClientMessage {
     /// 驗證訊息欄位長度
+    // 保持每個 arm 都用 inline `if` 風格一致；JoinRoom 雖只有單一 if，
+    // 不單獨改成 match guard 以免視覺不對稱
+    #[allow(clippy::collapsible_match)]
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
             ClientMessage::Register { nickname, .. } => {
