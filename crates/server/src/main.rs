@@ -51,6 +51,9 @@ async fn main() {
         .route("/ws", get(ws_handler))
         .route("/tunnel", get(tunnel_handler))
         .route("/health", get(|| async { "ok" }))
+        // 全域 permissive：對 /health 等 HTTP endpoint 生效；
+        // WebSocket 升級不走 CORS preflight，安全來自連線後限流 + 訊息協定
+        // 新增 endpoint 前須評估，詳見 CLAUDE.md「Server 安全模型」
         .layer(CorsLayer::permissive())
         .with_state(shared);
 
