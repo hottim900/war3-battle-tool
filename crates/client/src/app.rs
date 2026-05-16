@@ -209,11 +209,17 @@ impl War3App {
     }
 
     fn send_register(&self) {
-        let _ = self.cmd_tx.send(ClientMessage::Register {
-            nickname: self.config.nickname.clone(),
-            war3_version: self.config.war3_version,
-            client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        });
+        // 失敗即代表網路任務已死、整個 client 處於不可恢復狀態，
+        // 沒有額外 UI 狀態可重置，warn 已由 helper 記錄
+        let _ = try_send_cmd(
+            &self.cmd_tx,
+            ClientMessage::Register {
+                nickname: self.config.nickname.clone(),
+                war3_version: self.config.war3_version,
+                client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            },
+            "註冊",
+        );
     }
 
     /// 取消舊的 tunnel task（避免 ghost socket）
@@ -351,10 +357,18 @@ impl War3App {
 
         // 處理 host UPnP mapped 通知（背景 task → app → server）
         while let Ok((token, addr)) = self.upnp_mapped_rx.try_recv() {
-            let _ = self.cmd_tx.send(ClientMessage::UPnPMapped {
-                external_addr: addr.to_string(),
-                tunnel_token: token,
-            });
+            let sent = try_send_cmd(
+                &self.cmd_tx,
+                ClientMessage::UPnPMapped {
+                    external_addr: addr.to_string(),
+                    tunnel_token: token,
+                },
+                "UPnP 對映通知",
+            );
+            // 背景任務已斷：避免每個 queued item 都 log 一次
+            if !sent {
+                break;
+            }
         }
 
         // 處理 tunnel 事件
@@ -430,13 +444,17 @@ impl War3App {
                             verbosity = "concise",
                             "請先在 War3 中建立遊戲，再回來建立房間"
                         );
-                    } else {
-                        let _ = self.cmd_tx.send(ClientMessage::CreateRoom {
+                    } else if !try_send_cmd(
+                        &self.cmd_tx,
+                        ClientMessage::CreateRoom {
                             room_name,
                             map_name,
                             max_players,
                             gameinfo,
-                        });
+                        },
+                        "建立房間",
+                    ) {
+                        self.pending_action = None;
                     }
                 }
             }
@@ -870,6 +888,29 @@ impl Drop for War3App {
     }
 }
 
+/// 嘗試送出命令到背景 network task。失敗代表 receiver 已 drop
+/// （網路任務退出、tokio runtime 關閉、或 app 正在 shutdown），
+/// 記錄 warn 並回傳 false 讓呼叫端可以重置 UI pending 狀態，
+/// 避免使用者按按鈕無反應、無錯誤。
+///
+/// 回傳 bool 必須處理：若忽略則退化為 silent drop（#23 修復前的行為）。
+#[must_use = "send 失敗時呼叫端需要清除 pending UI 狀態，否則使用者會卡在 loading"]
+pub(crate) fn try_send_cmd(
+    cmd_tx: &mpsc::UnboundedSender<ClientMessage>,
+    msg: ClientMessage,
+    action_label: &str,
+) -> bool {
+    if let Err(e) = cmd_tx.send(msg) {
+        tracing::warn!(
+            verbosity = "concise",
+            "{action_label} 未送出：背景任務已中斷（{e}）"
+        );
+        false
+    } else {
+        true
+    }
+}
+
 /// SSRF 防護：拒絕 RFC1918、loopback、link-local 位址
 fn is_safe_external_addr(ip: std::net::IpAddr) -> bool {
     match ip {
@@ -1065,5 +1106,23 @@ mod tests {
     fn valid_external_addr_public_is_accepted() {
         let addr: SocketAddr = "203.0.113.50:19870".parse().unwrap();
         assert!(is_safe_external_addr(addr.ip()));
+    }
+
+    // ── try_send_cmd: 確保使用者命令失敗不再被靜默丟棄 (#23) ──
+
+    #[test]
+    fn try_send_cmd_returns_true_when_receiver_alive() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ClientMessage>();
+        let ok = try_send_cmd(&tx, ClientMessage::CloseRoom, "關閉房間");
+        assert!(ok);
+        assert!(matches!(rx.try_recv(), Ok(ClientMessage::CloseRoom)));
+    }
+
+    #[test]
+    fn try_send_cmd_returns_false_when_receiver_dropped() {
+        let (tx, rx) = mpsc::unbounded_channel::<ClientMessage>();
+        drop(rx);
+        let ok = try_send_cmd(&tx, ClientMessage::CloseRoom, "關閉房間");
+        assert!(!ok);
     }
 }
