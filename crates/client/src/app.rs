@@ -46,6 +46,9 @@ enum PendingAction {
     JoinFailed { reason: String },
     /// User clicked "create room"; waiting for RoomUpdate to confirm.
     CreatingRoom { room_name: String },
+    /// Generic server-side error or transport drop. Surface in red banner.
+    /// Used for: ServerMessage::Error (Register/CreateRoom 拒絕), 連線中斷時取消進行中操作。
+    ServerError { message: String },
 }
 
 pub struct War3App {
@@ -346,10 +349,32 @@ impl War3App {
                 NetEvent::Disconnected => {
                     self.connection_state = ConnectionState::Disconnected;
                     self.my_player_id = None;
+                    // 重置斷線時的 stale state，避免「線上 N 人 + 舊房間列表」幻覺
+                    self.players.clear();
+                    self.rooms.clear();
+                    // 進行中的動作 (Joining/CreatingRoom) 在 transport 失敗時永遠收不到
+                    // server response，把 banner 換成失敗訊息避免 spinner 卡死
+                    if matches!(
+                        self.pending_action,
+                        Some(PendingAction::Joining { .. } | PendingAction::CreatingRoom { .. })
+                    ) {
+                        self.pending_action = Some(PendingAction::ServerError {
+                            message: "與伺服器斷線，操作已取消".into(),
+                        });
+                    }
                     tracing::warn!(verbosity = "concise", "與伺服器的連線中斷");
                 }
                 NetEvent::Reconnecting { attempt } => {
                     self.connection_state = ConnectionState::Reconnecting { attempt };
+                    // 重連期間使用者若再次按鈕，同樣標記失敗
+                    if matches!(
+                        self.pending_action,
+                        Some(PendingAction::Joining { .. } | PendingAction::CreatingRoom { .. })
+                    ) {
+                        self.pending_action = Some(PendingAction::ServerError {
+                            message: "尚未連線，操作已取消".into(),
+                        });
+                    }
                     tracing::info!(verbosity = "concise", "正在重新連線... (第 {attempt} 次)");
                 }
                 NetEvent::ServerMessage(msg) => self.handle_server_message(msg),
@@ -569,6 +594,8 @@ impl War3App {
             }
             ServerMessage::Error { message } => {
                 tracing::error!(verbosity = "concise", "伺服器錯誤: {message}");
+                // 把 server 拒絕原因 surface 到紅色 banner，避免使用者按鈕後永遠不知道為何沒反應
+                self.pending_action = Some(PendingAction::ServerError { message });
             }
             ServerMessage::Unknown => {}
         }
@@ -673,6 +700,25 @@ impl War3App {
                     ui.spinner();
                     ui.label(format!("正在建立房間「{}」...", room_name));
                 });
+                ui.add_space(4.0);
+                true
+            }
+            PendingAction::ServerError { message } => {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(35, 15, 15, 200))
+                    .inner_margin(8.0)
+                    .corner_radius(4.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(0xef, 0x44, 0x44),
+                                format!("錯誤：{}", message),
+                            );
+                            if ui.button("確定").clicked() {
+                                self.pending_action = None;
+                            }
+                        });
+                    });
                 ui.add_space(4.0);
                 true
             }
