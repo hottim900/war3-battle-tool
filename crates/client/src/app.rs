@@ -46,6 +46,20 @@ enum PendingAction {
     JoinFailed { reason: String },
     /// User clicked "create room"; waiting for RoomUpdate to confirm.
     CreatingRoom { room_name: String },
+    /// Generic server-side error or transport drop. Surface in red banner.
+    /// Used for: ServerMessage::Error (Register/CreateRoom 拒絕), 連線中斷時取消進行中操作。
+    ServerError { message: String },
+}
+
+impl PendingAction {
+    /// Whether this action is awaiting a server response (spinner showing).
+    /// 用來判斷連線中斷/錯誤訊息進來時是否該取消當前操作。
+    fn is_in_flight(&self) -> bool {
+        matches!(
+            self,
+            PendingAction::Joining { .. } | PendingAction::CreatingRoom { .. }
+        )
+    }
 }
 
 pub struct War3App {
@@ -337,6 +351,11 @@ impl War3App {
                 NetEvent::Connected => {
                     self.connection_state = ConnectionState::Connected;
                     self.ever_connected = true;
+                    // 重連成功後清掉斷線時設的 stale ServerError，避免「● 已連線」+
+                    // 紅 banner「中斷連線」自相矛盾
+                    if matches!(self.pending_action, Some(PendingAction::ServerError { .. })) {
+                        self.pending_action = None;
+                    }
                     tracing::info!(verbosity = "concise", "已連線到發現伺服器");
 
                     if !self.is_registered() && self.config.is_configured() {
@@ -346,10 +365,32 @@ impl War3App {
                 NetEvent::Disconnected => {
                     self.connection_state = ConnectionState::Disconnected;
                     self.my_player_id = None;
+                    self.players.clear();
+                    self.rooms.clear();
+                    // transport 失敗時 in-flight 動作永遠收不到 response，換成錯誤
+                    // banner 避免 spinner 卡死（PR #28 修了 channel send 失敗，這裡修 ws_tx 失敗）
+                    if self
+                        .pending_action
+                        .as_ref()
+                        .is_some_and(PendingAction::is_in_flight)
+                    {
+                        self.pending_action = Some(PendingAction::ServerError {
+                            message: "與伺服器中斷連線，操作已取消".into(),
+                        });
+                    }
                     tracing::warn!(verbosity = "concise", "與伺服器的連線中斷");
                 }
                 NetEvent::Reconnecting { attempt } => {
                     self.connection_state = ConnectionState::Reconnecting { attempt };
+                    if self
+                        .pending_action
+                        .as_ref()
+                        .is_some_and(PendingAction::is_in_flight)
+                    {
+                        self.pending_action = Some(PendingAction::ServerError {
+                            message: "與伺服器中斷連線，操作已取消".into(),
+                        });
+                    }
                     tracing::info!(verbosity = "concise", "正在重新連線... (第 {attempt} 次)");
                 }
                 NetEvent::ServerMessage(msg) => self.handle_server_message(msg),
@@ -569,6 +610,21 @@ impl War3App {
             }
             ServerMessage::Error { message } => {
                 tracing::error!(verbosity = "concise", "伺服器錯誤: {message}");
+                // 依當前 pending 決定如何 surface：
+                // - Joining 中 → JoinFailed 保持語意（reuse「加入失敗」banner）
+                // - CreatingRoom / None → 通用 ServerError banner
+                // - JoinSuccess / 已存在的失敗訊息 → 只 log 不覆蓋（避免吃掉成功狀態或無聲蓋掉前一則錯誤）
+                match self.pending_action.take() {
+                    Some(PendingAction::Joining { .. }) => {
+                        self.pending_action = Some(PendingAction::JoinFailed { reason: message });
+                    }
+                    Some(PendingAction::CreatingRoom { .. }) | None => {
+                        self.pending_action = Some(PendingAction::ServerError { message });
+                    }
+                    Some(existing) => {
+                        self.pending_action = Some(existing);
+                    }
+                }
             }
             ServerMessage::Unknown => {}
         }
@@ -673,6 +729,25 @@ impl War3App {
                     ui.spinner();
                     ui.label(format!("正在建立房間「{}」...", room_name));
                 });
+                ui.add_space(4.0);
+                true
+            }
+            PendingAction::ServerError { message } => {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_unmultiplied(35, 15, 15, 200))
+                    .inner_margin(8.0)
+                    .corner_radius(4.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(0xef, 0x44, 0x44),
+                                format!("錯誤：{}", message),
+                            );
+                            if ui.button("確定").clicked() {
+                                self.pending_action = None;
+                            }
+                        });
+                    });
                 ui.add_space(4.0);
                 true
             }
