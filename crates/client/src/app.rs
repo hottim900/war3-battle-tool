@@ -147,6 +147,7 @@ impl War3App {
         cc.egui_ctx.set_style(style);
 
         let needs_wizard = !config.is_configured();
+        let log_buffer_size = config.log_buffer_size;
         let (tunnel_event_tx, tunnel_event_rx) = mpsc::unbounded_channel();
         let (upnp_mapped_tx, upnp_mapped_rx) = mpsc::unbounded_channel();
 
@@ -171,7 +172,7 @@ impl War3App {
                 None
             },
             lobby: LobbyPanel::new(),
-            log_panel: LogPanel::new(),
+            log_panel: LogPanel::new(log_buffer_size),
             log_tab: LogTab::Log,
             pending_action: None,
             pending_gameinfo: None,

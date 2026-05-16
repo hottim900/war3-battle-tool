@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LOG_BUFFER_MAX, LOG_BUFFER_MIN};
 
 /// 設定面板
 pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool) {
@@ -35,6 +35,20 @@ pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool
             if ui
                 .text_edit_singleline(&mut config.local_ip)
                 .on_hover_text("封包注入的目標 IP（通常為 127.0.0.1 或真實網卡 IP）")
+                .changed()
+            {
+                *config_changed = true;
+            }
+            ui.end_row();
+
+            ui.label("日誌緩衝大小：");
+            let slider =
+                egui::Slider::new(&mut config.log_buffer_size, LOG_BUFFER_MIN..=LOG_BUFFER_MAX)
+                    .step_by(500.0)
+                    .suffix(" 筆");
+            if ui
+                .add(slider)
+                .on_hover_text("LogPanel 保留的最近訊息數，重啟後生效")
                 .changed()
             {
                 *config_changed = true;

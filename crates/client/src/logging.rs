@@ -183,6 +183,68 @@ where
     }
 }
 
+// ── File writer ────────────────────────────────────────────
+
+/// 預設 log 目錄：`{data_dir}/war3-battle-tool/logs`。
+/// 回傳 None 表示作業系統未提供 data_dir（極罕見的 headless 環境）。
+pub fn default_log_dir() -> Option<std::path::PathBuf> {
+    dirs::data_dir().map(|d| d.join("war3-battle-tool").join("logs"))
+}
+
+/// 在 `log_dir` 建立 session log 檔案，回傳 mutex 包住的 File。
+/// 失敗回傳 None（caller 應 fallback：不附加 file layer，程式照樣啟動）。
+///
+/// 行為：先 `create_dir_all` 確保目錄存在、清理舊 log（保留 `keep_files` 個）、
+/// 再建立檔名為 `war3-<timestamp>.log` 的新檔。
+pub fn setup_file_writer(
+    log_dir: &std::path::Path,
+    keep_files: usize,
+) -> Option<std::sync::Mutex<std::fs::File>> {
+    if let Err(e) = std::fs::create_dir_all(log_dir) {
+        eprintln!("無法建立 log 目錄 {}: {e}", log_dir.display());
+        return None;
+    }
+
+    cleanup_old_logs(log_dir, keep_files);
+
+    let now = chrono::Local::now();
+    // 毫秒精度避免同秒兩個 instance 啟動時覆寫對方 log（崩潰立刻重啟情境）
+    let filename = format!("war3-{}.log", now.format("%Y-%m-%dT%H-%M-%S%.3f"));
+    let filepath = log_dir.join(&filename);
+
+    match std::fs::File::create(&filepath) {
+        Ok(f) => Some(std::sync::Mutex::new(f)),
+        Err(e) => {
+            eprintln!("無法建立 log 檔案 {}: {e}", filepath.display());
+            None
+        }
+    }
+}
+
+/// 保留 log 目錄中最新的 `keep` 個 .log 檔案，刪除其餘。
+fn cleanup_old_logs(log_dir: &std::path::Path, keep: usize) {
+    let mut logs: Vec<_> = std::fs::read_dir(log_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+        .filter_map(|e| {
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((modified, e.path()))
+        })
+        .collect();
+
+    if logs.len() <= keep {
+        return;
+    }
+
+    logs.sort_by_key(|(t, _)| *t);
+
+    for (_, path) in &logs[..logs.len() - keep] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -281,6 +343,42 @@ mod tests {
 
         let entry = rx.try_recv().expect("should receive log entry");
         assert_eq!(entry.message, "已處理 42 筆");
+    }
+
+    // ── File writer tests ──
+
+    #[test]
+    fn test_file_layer_creates_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log_dir = tmp.path().join("logs");
+        let writer = setup_file_writer(&log_dir, 30);
+        assert!(writer.is_some(), "writer should be created");
+
+        let entries: Vec<_> = std::fs::read_dir(&log_dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+            .collect();
+        assert_eq!(entries.len(), 1, "exactly one .log file should be created");
+
+        let name = entries[0].file_name();
+        let name_str = name.to_string_lossy();
+        assert!(
+            name_str.starts_with("war3-") && name_str.ends_with(".log"),
+            "filename pattern: got {name_str}"
+        );
+    }
+
+    #[test]
+    fn test_log_dir_failure_fallback() {
+        // 不可寫的父路徑：在已存在的檔案下建子目錄 → create_dir_all 必失敗
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let blocker = tmp.path().join("notadir");
+        std::fs::write(&blocker, b"file, not dir").expect("write blocker");
+        let bad_path = blocker.join("logs");
+
+        let writer = setup_file_writer(&bad_path, 30);
+        assert!(writer.is_none(), "fallback should return None, not panic");
     }
 
     #[test]
