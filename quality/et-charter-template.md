@@ -134,5 +134,6 @@ Session report 中記錄你探索了什麼、為什麼沒發現問題，這些�
 
 - [discovery-strategy.md](./discovery-strategy.md) — 雙層模型與互饋迴圈
 - [defect-taxonomy.md](./defect-taxonomy.md) — 搜查手冊（含各類別的 charter seed）
+- [backlog-audit.md](./backlog-audit.md) — Deferred items 處理協議
 - [README.md](./README.md) — 品質管理追蹤總覽
 - [examples/sparkle/et-charters.md](../examples/sparkle/et-charters.md) — 真實 ET 執行範例

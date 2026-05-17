@@ -476,6 +476,7 @@ Trigger: 重要 PR 修改安全相關 code 後
 
 - [discovery-strategy.md](./discovery-strategy.md) — 雙層模型：搜查手冊與 ET 如何互饋
 - [et-charter-template.md](./et-charter-template.md) — Charter 模板與 Quick Start
+- [backlog-audit.md](./backlog-audit.md) — Deferred items 處理協議（搜查找出來後的下一站）
 - [README.md](./README.md) — 品質管理追蹤總覽
 
 ---
