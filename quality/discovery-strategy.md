@@ -144,6 +144,7 @@ Charter 模板和使用說明見 [et-charter-template.md](./et-charter-template.
 
 - [et-charter-template.md](./et-charter-template.md) — Charter 模板與 Quick Start
 - [defect-taxonomy.md](./defect-taxonomy.md) — 搜查手冊（含各類別的 charter seed）
+- [backlog-audit.md](./backlog-audit.md) — Deferred items 處理協議（發現後不立即修的 staleness review）
 - [README.md](./README.md) — 品質管理追蹤總覽
 - [quality-system-design-notes.md](./quality-system-design-notes.md) — 設計筆記與方法論來源
 - [examples/sparkle/et-charters.md](../examples/sparkle/et-charters.md) — 真實 ET 執行範例

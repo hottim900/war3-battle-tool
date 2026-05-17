@@ -141,4 +141,5 @@ war3-battle-tool 的品質管理體系。追蹤缺陷、技術債、功能缺口
 - [discovery-strategy.md](./discovery-strategy.md) — 雙層品質發現模型
 - [et-charter-template.md](./et-charter-template.md) — 探索式測試 Charter 模板
 - [defect-taxonomy.md](./defect-taxonomy.md) — 缺陷分類學搜查手冊
+- [backlog-audit.md](./backlog-audit.md) — Deferred issues staleness 審查協議
 - [quality-system-design-notes.md](./quality-system-design-notes.md) — 設計筆記與方法論來源
