@@ -14,7 +14,7 @@ use crate::net::discovery::NetEvent;
 use crate::net::packet::{RawUdpInjector, check_room};
 use crate::net::quic::StrategyResult;
 use crate::net::tunnel::{self, Transport, TunnelEvent};
-use crate::ui::lobby::{LobbyAction, LobbyPanel};
+use crate::ui::lobby::{LobbyAction, LobbyPanel, web_viewer_base_url};
 use crate::ui::log_panel::LogPanel;
 use crate::ui::setup_wizard::SetupWizard;
 
@@ -166,6 +166,7 @@ impl War3App {
         let log_buffer_size = config.log_buffer_size;
         let (tunnel_event_tx, tunnel_event_rx) = mpsc::unbounded_channel();
         let (upnp_mapped_tx, upnp_mapped_rx) = mpsc::unbounded_channel();
+        let viewer_base_url = web_viewer_base_url(&server_url);
 
         let app = Self {
             config,
@@ -187,7 +188,7 @@ impl War3App {
             } else {
                 None
             },
-            lobby: LobbyPanel::new(),
+            lobby: LobbyPanel::new(viewer_base_url),
             log_panel: LogPanel::new(log_buffer_size),
             log_tab: LogTab::Log,
             pending_action: None,
