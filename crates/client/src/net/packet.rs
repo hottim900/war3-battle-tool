@@ -1,9 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use tokio::sync::Semaphore;
 use war3_protocol::war3::{WAR3_PORT, War3Version};
 
 /// 檢查遠端房主是否有開房（正常 UDP，不需要 npcap）
@@ -27,47 +25,6 @@ pub fn check_room(host_ip: Ipv4Addr, version: War3Version) -> Result<Vec<u8>> {
         Ok((len, _)) => bail!("收到的回覆太短 ({len} bytes)"),
         Err(e) => bail!("沒有收到房間回覆: {e}"),
     }
-}
-
-/// 掃描 /24 子網路，找出有開房的 War3 主機（正常 UDP，不需要 npcap）
-#[allow(dead_code)]
-pub async fn scan_rooms(subnet: &str, version: War3Version) -> Result<Vec<(Ipv4Addr, Vec<u8>)>> {
-    let base_ip = parse_subnet_base(subnet)?;
-    let octets = base_ip.octets();
-
-    let semaphore = Arc::new(Semaphore::new(20));
-    let mut handles = Vec::with_capacity(254);
-
-    for i in 1..=254u8 {
-        let ip = Ipv4Addr::new(octets[0], octets[1], octets[2], i);
-        let permit = Arc::clone(&semaphore);
-
-        handles.push(tokio::spawn(async move {
-            let _permit = permit.acquire().await;
-            match check_room(ip, version) {
-                Ok(data) => Some((ip, data)),
-                Err(_) => None,
-            }
-        }));
-    }
-
-    let mut results = Vec::new();
-    for handle in handles {
-        if let Ok(Some(entry)) = handle.await {
-            results.push(entry);
-        }
-    }
-
-    Ok(results)
-}
-
-/// 解析 "/24" 子網路字串，取得基底 IP
-fn parse_subnet_base(subnet: &str) -> Result<Ipv4Addr> {
-    let ip_str = subnet.split('/').next().unwrap_or(subnet);
-    let ip: Ipv4Addr = ip_str
-        .parse()
-        .with_context(|| format!("無效的子網路位址: {subnet}"))?;
-    Ok(ip)
 }
 
 /// 從 127.0.0.2 發送 GAMEINFO 到本地 War3（不需要 npcap）
