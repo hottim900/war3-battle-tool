@@ -48,6 +48,7 @@ cargo build --workspace --exclude spike-packet
 | `war3-server` | WebSocket 大廳 (/ws) + 遊戲 relay (/tunnel) 伺服器 |
 | `war3-protocol` | 共用的訊息格式與 War3 封包定義 |
 | `spike-raw-udp` | 驗證用 PoC 工具（不納入預設 build） |
+| `spike-packet` | Windows-only 封包診斷工具（不納入預設 build） |
 
 ### 執行測試
 

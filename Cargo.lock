@@ -3689,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "spike-packet"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "pcap",
@@ -3697,21 +3697,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "spike-quic"
-version = "0.4.1"
-dependencies = [
- "anyhow",
- "quinn",
- "rcgen",
- "rustls",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "spike-raw-udp"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "war3-protocol",
@@ -4363,7 +4350,7 @@ dependencies = [
 
 [[package]]
 name = "war3-client"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4388,7 +4375,7 @@ dependencies = [
 
 [[package]]
 name = "war3-protocol"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4396,7 +4383,7 @@ dependencies = [
 
 [[package]]
 name = "war3-server"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "axum",

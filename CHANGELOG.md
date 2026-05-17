@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.2] - 2026-05-18
+
+### Security
+- `is_safe_external_addr` SSRF 防線整合到 `protocol` crate 為單一 source of truth：server `UPnPMapped` 與 client `PeerUPnPAddr` 兩端原本各有獨立實作 + 各自 tests，未來放鬆 IPv4 私有/CGNAT 或 IPv6 ULA/link-local 規則時若任一端忘記同步，drift 即發生
+- 「複製連結」按鈕剝 userinfo (`user:pass@`)、query (`?...`)、fragment (`#...`)：若 `SERVER_URL` 含 credentials，舊版會把整段帶到剪貼簿，貼到 Discord/Telegram 即外洩
+
+### Fixed
+- 自架 server 的人 ship 自家 client 給朋友時，「複製連結」產生的 URL 不再永遠指向 production `https://war3.kalthor.cc`，改由 `SERVER_URL` 推導對齊自架 domain（`wss://my-war3.example.com/ws` → `https://my-war3.example.com/join?room=...`）。`SELF-HOSTING.md` 補上的最後一塊
+
+### Added
+- Server `broadcast_state` try_send 失敗時 warn log 該玩家 player_id 短前綴：`mpsc::Sender` buffer 滿（client 消費過慢或斷線中）原本被 `let _ =` 靜默吞掉，現在維運從 log 可看出哪些 client 經常 drop（同 IP 多人 = 該網段連線品質差）
+
+### Changed
+- 移除 dead config 欄位 `local_ip`：PR #6 v0.2.0 零配置體驗後 obsolete（packet.rs 寫死 `127.0.0.2 → 127.0.0.1:6112`），主流程從不讀，僅 settings UI 自己讀自己存。舊 config 含此欄位透過 serde unknown_field 機制忽略，向前相容
+- 移除 dead code `scan_rooms` / `parse_subnet_base`：LAN /24 子網路掃描殘留，零 caller 1 個月（僅靠 `#[allow(dead_code)]` 壓 warning）
+
+### Removed
+- Dead crate `crates/spike-quic`：QUIC 邏輯已被 `crates/client/src/net/quic.rs` (445 行 + tests) 完整取代 43 天，無任何 source 引用，不在 `default-members`、不在 release binary
+
+### For contributors
+- 7-commit deep audit + 3-agent ship-readiness review pipeline（code-reviewer + reuse/DRY + correctness/race 三視角並行）發現文件與 ground truth drift 多處：
+  - TODOS.md「Phase 2 Mid-game Hot Swap (DEFERRED)」段已過時——`bridge_tcp_ws_with_swap` (`net/tunnel.rs:525-767`) 三 phase 實作 + `SWAP_READY`/`SWAP_ACK` in-stream handshake + `quic_buffer` + `tcp_outbound_buffer` 維持封包順序早已落地，`swap_poc.rs::test_mid_game_swap_zero_data_loss` + `test_swap_under_heavy_load` 涵蓋。改寫成 `[x] Completed`
+  - 「多人 QUIC（>2 人）」描述不精準——真正阻塞是 `app.rs::start_host_tunnel` 在 PlayerJoined 時 abort 舊 tunnel，與 QUIC 本身無關。改寫為「host 端多 tunnel 支援」加註 code path 與前置驗證（War3 host 對多 TCP connection 行為）
+- TODOS.md 移除非工程 backlog（推廣/競爭對手/地理聚焦策略）——這類項目沒有 PR/CI 完成路徑，留在工程 backlog 稀釋訊號
+
+### Deferred (trigger 條件未滿足，audit comments 留 trail keep-until 2026-11-17)
+- `short_id(&str) -> &str` helper 抽 protocol crate — 11 處 `id.get(..8).unwrap_or(id)` cross-crate 重複（server tunnel/main/ws/state + client tunnel/app），本次 broadcast warn 又新增 1 處。Trigger: 下次 logging hot path 改動
+- `web_viewer_base_url` 從 `ui/lobby.rs` 移到 `crate::url` 或 `crate::server_url` — UI 第二個 panel（如 setup_wizard）也要顯示 viewer URL 時觸發
+- `addr_safety` 模組可重新命名 `external_addr` 對齊 `MAX_EXTERNAL_ADDR_LEN` — 加第二個 external addr helper（如 length validation）時觸發
+
 ## [0.4.1] - 2026-05-17
 
 ### Security
@@ -18,7 +48,7 @@ All notable changes to this project will be documented in this file.
 - Workspace `version.workspace` 改為 `0.4.1`（先前 `[workspace.package].version` 停在 `0.1.0` 導致 client binary 自報版本錯誤）
 
 ### Deferred (trigger 條件未滿足，audit comments 留 trail keep-until 2026-11-17)
-- #33 `AppConfig::normalize()` 擴展到 nickname/server_url/local_ip — when threat model 加入 config tampering
+- #33 `AppConfig::normalize()` 擴展到 nickname/server_url — when threat model 加入 config tampering（`local_ip` 欄位於後續清理中已移除）
 - #35 `LogPanel::set_max_entries` runtime live-resize — when 使用者抱怨「重啟才生效」
 - #36 `cleanup_old_logs` N+1 防護 — when log_dir 改可指定任意路徑，或啟動慢投訴出現
 - #37 `logging.rs` 拆檔 — when file/layer 加 rotation/compression/metric，或行數 > 500

@@ -31,16 +31,6 @@ pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool
             }
             ui.end_row();
 
-            ui.label("本地 IP：");
-            if ui
-                .text_edit_singleline(&mut config.local_ip)
-                .on_hover_text("封包注入的目標 IP（通常為 127.0.0.1 或真實網卡 IP）")
-                .changed()
-            {
-                *config_changed = true;
-            }
-            ui.end_row();
-
             ui.label("日誌緩衝大小：");
             let slider =
                 egui::Slider::new(&mut config.log_buffer_size, LOG_BUFFER_MIN..=LOG_BUFFER_MAX)
@@ -63,8 +53,8 @@ pub fn show(ui: &mut egui::Ui, config: &mut AppConfig, config_changed: &mut bool
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if ui.button("測試 Port 6112").clicked() {
-            let addr = format!("{}:{}", config.local_ip, 6112);
-            match std::net::TcpListener::bind(&addr) {
+            let addr = "127.0.0.1:6112";
+            match std::net::TcpListener::bind(addr) {
                 Ok(_) => {
                     tracing::info!("Port 6112 可用");
                 }

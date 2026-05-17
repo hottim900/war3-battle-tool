@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::{RwLock, mpsc};
+use tracing::warn;
 use war3_protocol::messages::{PlayerInfo, RoomInfo, ServerMessage};
 use war3_protocol::war3::War3Version;
 
@@ -107,11 +108,29 @@ impl AppState {
                 .collect(),
         };
 
+        // 收集失敗的 player_id（buffer 滿表示該 client 消費太慢）。
+        // 靜默丟掉訊息會讓網路慢的玩家 UI stale 卻沒人發現——warn 至少留 trail，
+        // 維運可從 log 看出哪些 IP 經常 drop。
+        let mut dropped: Vec<String> = Vec::new();
         for player in players.values() {
             if player.disconnected_at.is_none() {
-                let _ = player.tx.try_send(player_update.clone());
-                let _ = player.tx.try_send(room_update.clone());
+                let p_ok = player.tx.try_send(player_update.clone()).is_ok();
+                let r_ok = player.tx.try_send(room_update.clone()).is_ok();
+                if !p_ok || !r_ok {
+                    let short = player
+                        .player_id
+                        .get(..8)
+                        .unwrap_or(&player.player_id)
+                        .to_string();
+                    dropped.push(short);
+                }
             }
+        }
+        if !dropped.is_empty() {
+            // 「至少一條 update 未送達」——p_ok / r_ok 之間 receiver 可能消化掉 buffer
+            // 中一格，導致只有半條成功；都當作 drop 對待，server 端視為「該玩家
+            // 這一輪可能 stale」。
+            warn!(?dropped, "broadcast: 部分 update 未送達");
         }
     }
 

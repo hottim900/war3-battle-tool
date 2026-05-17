@@ -15,16 +15,9 @@ pub struct AppConfig {
     pub nickname: String,
     pub war3_version: War3Version,
     pub server_url: String,
-    /// 本地 IP，用於封包注入目標（loopback 或真實網卡 IP）
-    #[serde(default = "default_local_ip")]
-    pub local_ip: String,
     /// LogPanel ring buffer 大小（1000-5000）
     #[serde(default = "default_log_buffer_size")]
     pub log_buffer_size: usize,
-}
-
-fn default_local_ip() -> String {
-    "127.0.0.1".into()
 }
 
 fn default_log_buffer_size() -> usize {
@@ -38,7 +31,6 @@ impl Default for AppConfig {
             war3_version: War3Version::V127,
             server_url: std::env::var("SERVER_URL")
                 .unwrap_or_else(|_| "wss://war3.kalthor.cc/ws".into()),
-            local_ip: default_local_ip(),
             log_buffer_size: default_log_buffer_size(),
         }
     }

@@ -12,19 +12,57 @@ pub enum LobbyAction {
     CreateRoom { max_players: u8 },
 }
 
+/// 從 server_url 推導 web viewer base URL。
+///
+/// 自架 server 的人 ship 自家 client 給朋友時，「複製連結」按鈕產生的 URL
+/// 必須對齊他們設定的 `SERVER_URL`，否則朋友收到的 link 永遠指向 production
+/// `war3.kalthor.cc`（self-host bug）。
+///
+/// 規則：scheme 把 ws/wss 換成 http/https，剝掉 `/ws` 等 path、`?query`、
+/// `#fragment`，**並剝掉 `user:pass@` userinfo 避免 credentials 進到貼給朋友的連結**
+/// （若 user 把 token 塞到 SERVER_URL，舊實作會原樣帶到剪貼簿）。
+/// malformed 或非 ws/wss/http/https → fallback production URL，保證舊行為不退化。
+pub fn web_viewer_base_url(server_url: &str) -> String {
+    let (scheme, rest) = if let Some(r) = server_url.strip_prefix("wss://") {
+        ("https", r)
+    } else if let Some(r) = server_url.strip_prefix("ws://") {
+        ("http", r)
+    } else if let Some(r) = server_url.strip_prefix("https://") {
+        ("https", r)
+    } else if let Some(r) = server_url.strip_prefix("http://") {
+        ("http", r)
+    } else {
+        return "https://war3.kalthor.cc".to_string();
+    };
+    // 順序：先 path（/）→ 再 query/fragment（?#）→ 最後 userinfo（@），
+    // 因為 query/fragment 可能在 authority 後不經 path 直接出現
+    // （RFC 3986 `authority [ "?" query ] [ "#" fragment ]`）。
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    let host_port = host_port.split(['?', '#']).next().unwrap_or(host_port);
+    // userinfo: `user:pass@host` → rsplit 取 `@` 之後（IPv6 brackets 內 host 不含 `@`）
+    let host_port = host_port.rsplit('@').next().unwrap_or(host_port);
+    if host_port.is_empty() {
+        return "https://war3.kalthor.cc".to_string();
+    }
+    format!("{scheme}://{host_port}")
+}
+
 /// 大廳畫面：上方房間列表，下方線上玩家
 pub struct LobbyPanel {
     pub create_max_players: u8,
     pub show_create_dialog: bool,
     pub show_diagnostics: bool,
+    /// Derived from server_url at construction; used for "複製連結" 按鈕
+    viewer_base_url: String,
 }
 
 impl LobbyPanel {
-    pub fn new() -> Self {
+    pub fn new(viewer_base_url: String) -> Self {
         Self {
             create_max_players: 4,
             show_create_dialog: false,
             show_diagnostics: false,
+            viewer_base_url,
         }
     }
 
@@ -136,8 +174,8 @@ impl LobbyPanel {
                                             if is_mine {
                                                 if ui.button("複製連結").clicked() {
                                                     let link = format!(
-                                                        "https://war3.kalthor.cc/join?room={}",
-                                                        room.room_id
+                                                        "{}/join?room={}",
+                                                        self.viewer_base_url, room.room_id
                                                     );
                                                     ui.ctx().copy_text(link);
                                                 }
@@ -362,5 +400,135 @@ impl LobbyPanel {
         });
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_wss_derives_https() {
+        assert_eq!(
+            web_viewer_base_url("wss://war3.kalthor.cc/ws"),
+            "https://war3.kalthor.cc"
+        );
+    }
+
+    #[test]
+    fn dev_ws_localhost_with_port() {
+        assert_eq!(
+            web_viewer_base_url("ws://localhost:3000/ws"),
+            "http://localhost:3000"
+        );
+    }
+
+    #[test]
+    fn self_host_wss_no_path() {
+        assert_eq!(
+            web_viewer_base_url("wss://my-war3.example.com"),
+            "https://my-war3.example.com"
+        );
+    }
+
+    #[test]
+    fn self_host_wss_with_port_and_path() {
+        assert_eq!(
+            web_viewer_base_url("wss://my-war3.example.com:8443/ws"),
+            "https://my-war3.example.com:8443"
+        );
+    }
+
+    #[test]
+    fn passthrough_https() {
+        assert_eq!(
+            web_viewer_base_url("https://example.com"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn passthrough_http_strips_path() {
+        assert_eq!(
+            web_viewer_base_url("http://example.com/ws"),
+            "http://example.com"
+        );
+    }
+
+    #[test]
+    fn ipv6_loopback_with_port() {
+        assert_eq!(
+            web_viewer_base_url("ws://[::1]:3000/ws"),
+            "http://[::1]:3000"
+        );
+    }
+
+    #[test]
+    fn malformed_falls_back_to_production() {
+        assert_eq!(web_viewer_base_url("not-a-url"), "https://war3.kalthor.cc");
+    }
+
+    #[test]
+    fn empty_falls_back_to_production() {
+        assert_eq!(web_viewer_base_url(""), "https://war3.kalthor.cc");
+    }
+
+    #[test]
+    fn empty_host_falls_back_to_production() {
+        // `wss://` 後沒有 host：避免產出 `https:///join?room=...`
+        assert_eq!(web_viewer_base_url("wss://"), "https://war3.kalthor.cc");
+        assert_eq!(web_viewer_base_url("wss:///ws"), "https://war3.kalthor.cc");
+    }
+
+    #[test]
+    fn userinfo_credentials_stripped() {
+        // 若 user 把 credentials 塞到 SERVER_URL（自架不應該但可能），
+        // 「複製連結」絕不能把 user:pass 帶到剪貼簿
+        assert_eq!(
+            web_viewer_base_url("wss://user:pass@host.example.com/ws"),
+            "https://host.example.com"
+        );
+        assert_eq!(
+            web_viewer_base_url("ws://token@localhost:3000/ws"),
+            "http://localhost:3000"
+        );
+    }
+
+    #[test]
+    fn query_string_stripped() {
+        // authority 後直接 ? 不經 path（RFC 3986）：必須剝掉避免拼接出無效 URL
+        assert_eq!(
+            web_viewer_base_url("wss://host.example.com?token=xyz"),
+            "https://host.example.com"
+        );
+        assert_eq!(
+            web_viewer_base_url("wss://host.example.com/ws?token=xyz"),
+            "https://host.example.com"
+        );
+    }
+
+    #[test]
+    fn fragment_stripped() {
+        assert_eq!(
+            web_viewer_base_url("wss://host.example.com#section"),
+            "https://host.example.com"
+        );
+    }
+
+    #[test]
+    fn userinfo_with_ipv6_stripped() {
+        // 確認 `@` 與 IPv6 brackets 互動正確：rsplit('@') 取 `@` 之後
+        assert_eq!(
+            web_viewer_base_url("ws://user@[::1]:3000/ws"),
+            "http://[::1]:3000"
+        );
+    }
+
+    #[test]
+    fn combined_userinfo_query_fragment_stripped() {
+        assert_eq!(
+            web_viewer_base_url("wss://user:pass@host.example.com:8443/ws?token=abc#frag"),
+            "https://host.example.com:8443"
+        );
     }
 }

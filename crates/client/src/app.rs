@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use tokio::sync::{mpsc, oneshot};
+use war3_protocol::addr_safety::is_safe_external_addr;
 use war3_protocol::messages::{ClientMessage, PlayerInfo, RoomInfo, ServerMessage};
 
 use crate::cmd_sender::CmdSender;
@@ -13,7 +14,7 @@ use crate::net::discovery::NetEvent;
 use crate::net::packet::{RawUdpInjector, check_room};
 use crate::net::quic::StrategyResult;
 use crate::net::tunnel::{self, Transport, TunnelEvent};
-use crate::ui::lobby::{LobbyAction, LobbyPanel};
+use crate::ui::lobby::{LobbyAction, LobbyPanel, web_viewer_base_url};
 use crate::ui::log_panel::LogPanel;
 use crate::ui::setup_wizard::SetupWizard;
 
@@ -165,6 +166,7 @@ impl War3App {
         let log_buffer_size = config.log_buffer_size;
         let (tunnel_event_tx, tunnel_event_rx) = mpsc::unbounded_channel();
         let (upnp_mapped_tx, upnp_mapped_rx) = mpsc::unbounded_channel();
+        let viewer_base_url = web_viewer_base_url(&server_url);
 
         let app = Self {
             config,
@@ -186,7 +188,7 @@ impl War3App {
             } else {
                 None
             },
-            lobby: LobbyPanel::new(),
+            lobby: LobbyPanel::new(viewer_base_url),
             log_panel: LogPanel::new(log_buffer_size),
             log_tab: LogTab::Log,
             pending_action: None,
@@ -973,31 +975,6 @@ impl Drop for War3App {
     }
 }
 
-/// SSRF 防護：拒絕 RFC1918、loopback、link-local 位址
-fn is_safe_external_addr(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            if v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-            {
-                return false;
-            }
-            // RFC 6598 CGNAT shared address space (100.64.0.0/10)
-            let octets = v4.octets();
-            !(octets[0] == 100 && (64..=127).contains(&octets[1]))
-        }
-        std::net::IpAddr::V6(v6) => {
-            !v6.is_loopback()
-                && !v6.is_unspecified()
-                // ULA (fc00::/7) 和 link-local (fe80::/10)
-                && !matches!(v6.segments()[0], 0xfc00..=0xfdff | 0xfe80..=0xfebf)
-        }
-    }
-}
-
 fn setup_cjk_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
@@ -1019,154 +996,4 @@ fn setup_cjk_fonts(ctx: &egui::Context) {
         .insert(0, "NotoSansTC".to_owned());
 
     ctx.set_fonts(fonts);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::IpAddr;
-
-    // ── T8: SSRF check — RFC1918/loopback/link-local → rejected ──
-
-    #[test]
-    fn ssrf_rejects_ipv4_loopback() {
-        assert!(!is_safe_external_addr(
-            "127.0.0.1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(!is_safe_external_addr(
-            "127.255.255.255".parse::<IpAddr>().unwrap()
-        ));
-    }
-
-    #[test]
-    fn ssrf_rejects_ipv4_private() {
-        // 10.0.0.0/8
-        assert!(!is_safe_external_addr(
-            "10.0.0.1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(!is_safe_external_addr(
-            "10.255.255.255".parse::<IpAddr>().unwrap()
-        ));
-        // 172.16.0.0/12
-        assert!(!is_safe_external_addr(
-            "172.16.0.1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(!is_safe_external_addr(
-            "172.31.255.255".parse::<IpAddr>().unwrap()
-        ));
-        // 192.168.0.0/16
-        assert!(!is_safe_external_addr(
-            "192.168.0.1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(!is_safe_external_addr(
-            "192.168.255.255".parse::<IpAddr>().unwrap()
-        ));
-    }
-
-    #[test]
-    fn ssrf_rejects_ipv4_link_local() {
-        assert!(!is_safe_external_addr(
-            "169.254.0.1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(!is_safe_external_addr(
-            "169.254.255.255".parse::<IpAddr>().unwrap()
-        ));
-    }
-
-    #[test]
-    fn ssrf_rejects_ipv4_broadcast() {
-        assert!(!is_safe_external_addr(
-            "255.255.255.255".parse::<IpAddr>().unwrap()
-        ));
-    }
-
-    #[test]
-    fn ssrf_rejects_ipv4_unspecified() {
-        assert!(!is_safe_external_addr("0.0.0.0".parse::<IpAddr>().unwrap()));
-    }
-
-    #[test]
-    fn ssrf_rejects_cgnat_ipv4() {
-        assert!(!is_safe_external_addr(
-            "100.64.1.1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(!is_safe_external_addr(
-            "100.127.255.255".parse::<IpAddr>().unwrap()
-        ));
-    }
-
-    #[test]
-    fn ssrf_accepts_public_ipv4() {
-        assert!(is_safe_external_addr("8.8.8.8".parse::<IpAddr>().unwrap()));
-        assert!(is_safe_external_addr("1.1.1.1".parse::<IpAddr>().unwrap()));
-        assert!(is_safe_external_addr(
-            "203.0.113.1".parse::<IpAddr>().unwrap()
-        ));
-    }
-
-    #[test]
-    fn ssrf_rejects_ipv6_loopback() {
-        assert!(!is_safe_external_addr("::1".parse::<IpAddr>().unwrap()));
-    }
-
-    #[test]
-    fn ssrf_rejects_ipv6_unspecified() {
-        assert!(!is_safe_external_addr("::".parse::<IpAddr>().unwrap()));
-    }
-
-    #[test]
-    fn ssrf_rejects_ipv6_ula() {
-        // fc00::/7 (fc00:: - fdff::)
-        assert!(!is_safe_external_addr("fc00::1".parse::<IpAddr>().unwrap()));
-        assert!(!is_safe_external_addr(
-            "fd12:3456:789a::1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(!is_safe_external_addr("fdff::1".parse::<IpAddr>().unwrap()));
-    }
-
-    #[test]
-    fn ssrf_rejects_ipv6_link_local() {
-        // fe80::/10
-        assert!(!is_safe_external_addr("fe80::1".parse::<IpAddr>().unwrap()));
-        assert!(!is_safe_external_addr("febf::1".parse::<IpAddr>().unwrap()));
-    }
-
-    #[test]
-    fn ssrf_accepts_public_ipv6() {
-        assert!(is_safe_external_addr(
-            "2001:db8::1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(is_safe_external_addr(
-            "2607:f8b0:4004:800::200e".parse::<IpAddr>().unwrap()
-        ));
-    }
-
-    // ── T3: Malformed external_addr → parse 失敗，被忽略 ──
-
-    #[test]
-    fn malformed_external_addr_parse_fails() {
-        // 空字串
-        assert!("".parse::<SocketAddr>().is_err());
-        // 非數字
-        assert!("not-an-address".parse::<SocketAddr>().is_err());
-        // 只有 IP 沒有 port
-        assert!("192.168.1.1".parse::<SocketAddr>().is_err());
-        // IPv6 without brackets
-        assert!("::1".parse::<SocketAddr>().is_err());
-    }
-
-    #[test]
-    fn valid_external_addr_but_unsafe_is_rejected() {
-        // 可以 parse 但不安全
-        let addr: SocketAddr = "192.168.1.1:19870".parse().unwrap();
-        assert!(!is_safe_external_addr(addr.ip()));
-        let addr: SocketAddr = "127.0.0.1:19870".parse().unwrap();
-        assert!(!is_safe_external_addr(addr.ip()));
-    }
-
-    #[test]
-    fn valid_external_addr_public_is_accepted() {
-        let addr: SocketAddr = "203.0.113.50:19870".parse().unwrap();
-        assert!(is_safe_external_addr(addr.ip()));
-    }
 }

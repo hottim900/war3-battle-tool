@@ -2,38 +2,17 @@
 
 ## From /autoplan review (2026-04-04)
 
-### 玩家發現/推廣策略
-- 在 War3 玩家聚集地宣傳（巴哈姆特、Discord、PTT、FB 群組）
-- 製作 5 分鐘上手影片
-- 測試朋友推薦的 viral loop
-- **Why:** CEO review 指出發現比安裝更重要。零配置解決「想用但裝不了」，但「不知道有這工具」是更大的問題。
-
-### 地理聚焦策略
-- 決定優先經營台灣、大陸、還是東南亞市場
-- 針對目標區域做在地化（用語、延遲優化、社群）
-- **Why:** 開源被 fork 的風險。先在一個地方做深，建立 brand loyalty。
-
-### 競爭對手分析
-- 調查台灣/海外老 War3 社群是否有其他類似工具
-- 分析 W3Champions 對舊版的策略（是否計畫支援）
-
 ### ~~NpcapSender 程式碼品質~~
 - **Completed:** v0.2.0 (2026-04-04) — npcap 已移除，改用 raw UDP + tunnel relay
 
-### Phase 2: Mid-game Hot Swap (DEFERRED)
-- 遊戲中從 relay 切換到 QUIC 直連，零資料遺失
-- **Blocked by:**
-  - Data loss during swap（drain 期間 War3 繼續送資料，try_send 丟棄）
-  - Asymmetric commit（一方 swap 另一方沒收到 commit）
-  - 需要 SwapPause + SwapAck 額外 protocol
-  - Premise 5 未驗證（proxy layer mid-game transport switch）
-- **Why deferred:** Phase 1 pre-game 路徑選擇已解決 90% 延遲問題，當前用戶量不支撐這個複雜度
-- **When:** 用戶量成長 + Phase 1 WAN 驗證完成後
-
 ### P2P 延伸
 - [x] UPnP 支援 — **Completed:** PR #13 (2026-04-05), Connection Strategy Engine
-- [ ] 多人 QUIC（>2 人目前用 WS relay）
-- [ ] QUIC stream 斷線後 WS 重建
+- [x] Phase 2: Mid-game WS relay → QUIC direct hot swap — **Completed:** PR #10 + #15 (`net/tunnel.rs::bridge_tcp_ws_with_swap`, swap_poc.rs 兩個 test 涵蓋 zero data loss + heavy load)
+- [ ] 多人遊戲（>2 人）host 端多 tunnel 支援
+  - Host 同時只持一條 tunnel：新 joiner 進來 abort 舊的（`app.rs::start_host_tunnel` 開頭呼叫 `abort_tunnel`）
+  - 需要：`tunnel_handle: HashMap<token, JoinHandle>` 多 active tunnel + 驗證 War3 host 對多 TCP connection 行為
+  - 影響：3+ player 房先進入的 joiner 會被踢
+- [ ] QUIC stream 斷線後 WS 重建（升級後 QUIC 抖動目前直接斷線，無 fallback）
 - [ ] Binary size CI gate（監控依賴膨脹）
 - [ ] 台灣 ISP hole punch 成功率實測（中華電信 vs 手機熱點）
 
