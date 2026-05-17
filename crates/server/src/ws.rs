@@ -7,6 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
+use war3_protocol::addr_safety::is_safe_external_addr;
 use war3_protocol::messages::{ClientMessage, ServerMessage};
 
 use crate::state::{AppState, ConnectedPlayer, Room};
@@ -499,89 +500,5 @@ pub async fn handle_socket(
             state.mark_disconnected(&player_id).await;
         }
         state.broadcast_state().await;
-    }
-}
-
-/// SSRF 防護：拒絕 RFC1918、loopback、link-local 位址
-fn is_safe_external_addr(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            if v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-            {
-                return false;
-            }
-            // RFC 6598 CGNAT shared address space (100.64.0.0/10)
-            let octets = v4.octets();
-            !(octets[0] == 100 && (64..=127).contains(&octets[1]))
-        }
-        IpAddr::V6(v6) => {
-            !v6.is_loopback()
-                && !v6.is_unspecified()
-                // ULA (fc00::/7) 和 link-local (fe80::/10)
-                && !matches!(v6.segments()[0], 0xfc00..=0xfdff | 0xfe80..=0xfebf)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── T12: Server SSRF validation (IPv4) ──
-
-    #[test]
-    fn ssrf_rejects_private_ipv4() {
-        let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        assert!(!is_safe_external_addr(ip));
-    }
-
-    #[test]
-    fn ssrf_rejects_loopback_ipv4() {
-        let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        assert!(!is_safe_external_addr(ip));
-    }
-
-    #[test]
-    fn ssrf_rejects_link_local_ipv4() {
-        let ip: IpAddr = "169.254.1.1".parse().unwrap();
-        assert!(!is_safe_external_addr(ip));
-    }
-
-    #[test]
-    fn ssrf_rejects_cgnat_ipv4() {
-        let ip: IpAddr = "100.64.1.1".parse().unwrap();
-        assert!(!is_safe_external_addr(ip));
-        let ip: IpAddr = "100.127.255.255".parse().unwrap();
-        assert!(!is_safe_external_addr(ip));
-    }
-
-    #[test]
-    fn ssrf_accepts_public_ipv4() {
-        let ip: IpAddr = "8.8.8.8".parse().unwrap();
-        assert!(is_safe_external_addr(ip));
-    }
-
-    // ── T12b: Server SSRF validation (IPv6) ──
-
-    #[test]
-    fn ssrf_rejects_ipv6_loopback() {
-        let ip: IpAddr = "::1".parse().unwrap();
-        assert!(!is_safe_external_addr(ip));
-    }
-
-    #[test]
-    fn ssrf_rejects_ipv6_link_local() {
-        let ip: IpAddr = "fe80::1".parse().unwrap();
-        assert!(!is_safe_external_addr(ip));
-    }
-
-    #[test]
-    fn ssrf_accepts_public_ipv6() {
-        let ip: IpAddr = "2001:db8::1".parse().unwrap();
-        assert!(is_safe_external_addr(ip));
     }
 }
