@@ -18,7 +18,7 @@ All notable changes to this project will be documented in this file.
 - Workspace `version.workspace` 改為 `0.4.1`（先前 `[workspace.package].version` 停在 `0.1.0` 導致 client binary 自報版本錯誤）
 
 ### Deferred (trigger 條件未滿足，audit comments 留 trail keep-until 2026-11-17)
-- #33 `AppConfig::normalize()` 擴展到 nickname/server_url/local_ip — when threat model 加入 config tampering
+- #33 `AppConfig::normalize()` 擴展到 nickname/server_url — when threat model 加入 config tampering（`local_ip` 欄位於後續清理中已移除）
 - #35 `LogPanel::set_max_entries` runtime live-resize — when 使用者抱怨「重啟才生效」
 - #36 `cleanup_old_logs` N+1 防護 — when log_dir 改可指定任意路徑，或啟動慢投訴出現
 - #37 `logging.rs` 拆檔 — when file/layer 加 rotation/compression/metric，或行數 > 500

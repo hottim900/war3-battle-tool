@@ -18,8 +18,10 @@ pub enum LobbyAction {
 /// 必須對齊他們設定的 `SERVER_URL`，否則朋友收到的 link 永遠指向 production
 /// `war3.kalthor.cc`（self-host bug）。
 ///
-/// 規則：scheme 把 ws/wss 換成 http/https，剝掉 `/ws` 等 path。malformed
-/// 或非 ws/wss/http/https → fallback production URL，保證舊行為不退化。
+/// 規則：scheme 把 ws/wss 換成 http/https，剝掉 `/ws` 等 path、`?query`、
+/// `#fragment`，**並剝掉 `user:pass@` userinfo 避免 credentials 進到貼給朋友的連結**
+/// （若 user 把 token 塞到 SERVER_URL，舊實作會原樣帶到剪貼簿）。
+/// malformed 或非 ws/wss/http/https → fallback production URL，保證舊行為不退化。
 pub fn web_viewer_base_url(server_url: &str) -> String {
     let (scheme, rest) = if let Some(r) = server_url.strip_prefix("wss://") {
         ("https", r)
@@ -32,7 +34,13 @@ pub fn web_viewer_base_url(server_url: &str) -> String {
     } else {
         return "https://war3.kalthor.cc".to_string();
     };
+    // 順序：先 path（/）→ 再 query/fragment（?#）→ 最後 userinfo（@），
+    // 因為 query/fragment 可能在 authority 後不經 path 直接出現
+    // （RFC 3986 `authority [ "?" query ] [ "#" fragment ]`）。
     let host_port = rest.split('/').next().unwrap_or(rest);
+    let host_port = host_port.split(['?', '#']).next().unwrap_or(host_port);
+    // userinfo: `user:pass@host` → rsplit 取 `@` 之後（IPv6 brackets 內 host 不含 `@`）
+    let host_port = host_port.rsplit('@').next().unwrap_or(host_port);
     if host_port.is_empty() {
         return "https://war3.kalthor.cc".to_string();
     }
@@ -470,5 +478,57 @@ mod tests {
         // `wss://` 後沒有 host：避免產出 `https:///join?room=...`
         assert_eq!(web_viewer_base_url("wss://"), "https://war3.kalthor.cc");
         assert_eq!(web_viewer_base_url("wss:///ws"), "https://war3.kalthor.cc");
+    }
+
+    #[test]
+    fn userinfo_credentials_stripped() {
+        // 若 user 把 credentials 塞到 SERVER_URL（自架不應該但可能），
+        // 「複製連結」絕不能把 user:pass 帶到剪貼簿
+        assert_eq!(
+            web_viewer_base_url("wss://user:pass@host.example.com/ws"),
+            "https://host.example.com"
+        );
+        assert_eq!(
+            web_viewer_base_url("ws://token@localhost:3000/ws"),
+            "http://localhost:3000"
+        );
+    }
+
+    #[test]
+    fn query_string_stripped() {
+        // authority 後直接 ? 不經 path（RFC 3986）：必須剝掉避免拼接出無效 URL
+        assert_eq!(
+            web_viewer_base_url("wss://host.example.com?token=xyz"),
+            "https://host.example.com"
+        );
+        assert_eq!(
+            web_viewer_base_url("wss://host.example.com/ws?token=xyz"),
+            "https://host.example.com"
+        );
+    }
+
+    #[test]
+    fn fragment_stripped() {
+        assert_eq!(
+            web_viewer_base_url("wss://host.example.com#section"),
+            "https://host.example.com"
+        );
+    }
+
+    #[test]
+    fn userinfo_with_ipv6_stripped() {
+        // 確認 `@` 與 IPv6 brackets 互動正確：rsplit('@') 取 `@` 之後
+        assert_eq!(
+            web_viewer_base_url("ws://user@[::1]:3000/ws"),
+            "http://[::1]:3000"
+        );
+    }
+
+    #[test]
+    fn combined_userinfo_query_fragment_stripped() {
+        assert_eq!(
+            web_viewer_base_url("wss://user:pass@host.example.com:8443/ws?token=abc#frag"),
+            "https://host.example.com:8443"
+        );
     }
 }

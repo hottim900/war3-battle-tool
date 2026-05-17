@@ -127,7 +127,10 @@ impl AppState {
             }
         }
         if !dropped.is_empty() {
-            warn!(?dropped, "broadcast: try_send 失敗，client 消費過慢");
+            // 「至少一條 update 未送達」——p_ok / r_ok 之間 receiver 可能消化掉 buffer
+            // 中一格，導致只有半條成功；都當作 drop 對待，server 端視為「該玩家
+            // 這一輪可能 stale」。
+            warn!(?dropped, "broadcast: 部分 update 未送達");
         }
     }
 
